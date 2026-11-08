@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+mod mcp;
+
 use std::io::Read as _;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -73,6 +75,8 @@ enum Command {
     Logout,
     /// List the available views
     Views,
+    /// Serve `list_items` and `add_manual_action` to an agent, over MCP on standard input and output
+    Mcp,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -270,6 +274,7 @@ async fn main() -> Result<()> {
             engine()?.purge_service("todoist.")?;
             println!("disconnected from Todoist");
         }
+        Command::Mcp => mcp::serve(engine()?).await?,
         Command::Views => {
             for view in engine()?.views() {
                 println!("{}  {}", view.id, view.title);
