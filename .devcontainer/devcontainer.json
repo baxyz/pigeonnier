@@ -1,0 +1,35 @@
+{
+  "name": "pigeonnier",
+  // Stable machine name: Remote Control names the environment "<hostname>:<folder>", and the
+  // default hostname is the container id, which changes on every rebuild.
+  "runArgs": ["--hostname=pigeonnier"],
+  // Node comes with the image, for the Tauri UI and the GNOME Shell extension of later milestones.
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:26",
+  "features": {
+    // ── Infrastructure ───────────────────────────────────────────────────────
+    "ghcr.io/helpers4/devcontainer/shell-history:1": {},
+    // ── Dev environment ──────────────────────────────────────────────────────
+    // GH_TOKEN and TODOIST_TOKEN come from OpenBao, not from remoteEnv: `${localEnv:…}` is empty
+    // when VS Code attaches and would override them.
+    "ghcr.io/helpers4/devcontainer/openbao-env:1": {
+      "address": "https://bao.baxyz.dev:8200",
+      "paths": "orgs/baxyz"
+    },
+    "ghcr.io/helpers4/devcontainer/git-absorb:1": {},
+    "ghcr.io/helpers4/devcontainer/essential-dev:1": {},
+    "ghcr.io/helpers4/devcontainer/github-dev:1": {},
+    "ghcr.io/helpers4/devcontainer/auto-header:1": {
+      "projectName": "pigeonnier",
+      "license": "AGPL-3.0-only"
+    },
+    // ── AI ───────────────────────────────────────────────────────────────────
+    "ghcr.io/helpers4/devcontainer/claude-dev:1": {
+      "remoteControl": true,
+      "remoteControlAutoTrust": true
+    },
+    // ── Rust ─────────────────────────────────────────────────────────────────
+    // rust-toolchain.toml pins the exact toolchain; rustup installs it on first cargo call.
+    "ghcr.io/devcontainers/features/rust:1": {}
+  },
+  "remoteUser": "node"
+}
