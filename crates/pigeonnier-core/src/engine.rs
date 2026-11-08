@@ -335,6 +335,9 @@ impl Engine {
         until: DateTime<FixedOffset>,
     ) -> Result<(), EngineError> {
         let Ok(id) = todoist_id(item_id) else {
+            if !self.items(until)?.iter().any(|item| item.id == item_id) {
+                return Err(EngineError::Gone(item_id.to_owned()));
+            }
             self.cache.snooze(item_id, until.with_timezone(&Utc))?;
             return Ok(());
         };

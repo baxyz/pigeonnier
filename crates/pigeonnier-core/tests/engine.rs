@@ -277,6 +277,10 @@ async fn a_pr_snoozes_locally() {
 
     let until = DateTime::parse_from_rfc3339("2026-11-10T08:00:00+01:00").unwrap();
     engine.snooze("gh-pr:acme/tool#3", until).await.unwrap();
+    assert!(matches!(
+        engine.snooze("gh-pr:acme/tool#404", until).await,
+        Err(EngineError::Gone(_))
+    ));
 
     let listed = |snapshot: pigeonnier_core::viewmodel::Snapshot| {
         snapshot.projects[0]

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use chrono::DateTime;
+use pigeonnier_core::engine::EngineError;
 use zbus::object_server::SignalEmitter;
 use zbus::{connection, fdo, interface};
 
@@ -21,6 +22,23 @@ pub struct Service {
 
 fn failed(error: impl std::fmt::Display) -> fdo::Error {
     fdo::Error::Failed(error.to_string())
+}
+
+impl Service {
+    /// zbus runs its methods on a runtime of its own, while the HTTP client needs tokio's.
+    async fn on_tokio(
+        &self,
+        action: impl Future<Output = Result<(), EngineError>> + Send + 'static,
+    ) -> fdo::Result<()> {
+        self.shared
+            .runtime
+            .spawn(action)
+            .await
+            .map_err(failed)?
+            .map_err(failed)?;
+        self.shared.refresh.notify_one();
+        Ok(())
+    }
 }
 
 #[interface(name = "io.github.baxyz.Pigeonnier1")]
@@ -42,20 +60,20 @@ impl Service {
     }
 
     async fn complete(&self, item_id: &str) -> fdo::Result<()> {
-        let engine = self.shared.engine.read().await;
-        engine.complete(item_id).await.map_err(failed)?;
-        self.shared.refresh.notify_one();
-        Ok(())
+        let shared = Arc::clone(&self.shared);
+        let item_id = item_id.to_owned();
+        self.on_tokio(async move { shared.engine.read().await.complete(&item_id).await })
+            .await
     }
 
     async fn snooze(&self, item_id: &str, until_unix: i64) -> fdo::Result<()> {
         let until = DateTime::from_timestamp(until_unix, 0)
             .ok_or_else(|| failed("invalid time"))?
             .with_timezone(now().offset());
-        let engine = self.shared.engine.read().await;
-        engine.snooze(item_id, until).await.map_err(failed)?;
-        self.shared.refresh.notify_one();
-        Ok(())
+        let shared = Arc::clone(&self.shared);
+        let item_id = item_id.to_owned();
+        self.on_tokio(async move { shared.engine.read().await.snooze(&item_id, until).await })
+            .await
     }
 
     /// Asks for the window, `sidebar` or `full`. The Shell extension places it.

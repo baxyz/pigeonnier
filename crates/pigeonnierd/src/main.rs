@@ -27,6 +27,7 @@ pub struct Shared {
     pub engine: RwLock<Engine>,
     pub revision: AtomicU32,
     pub refresh: Notify,
+    pub runtime: tokio::runtime::Handle,
 }
 
 #[must_use]
@@ -94,6 +95,7 @@ async fn main() -> Result<()> {
         engine: RwLock::new(engine),
         revision: AtomicU32::new(0),
         refresh: Notify::new(),
+        runtime: tokio::runtime::Handle::current(),
     });
 
     let connection = bus::serve(Arc::clone(&shared)).await?;
