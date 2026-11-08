@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The third step: select records. An absent field makes a predicate [`Truth::Unknown`], so a task
+//! The filter step: select records. An absent field makes a predicate [`Truth::Unknown`], so a task
 //! with no due date is neither overdue nor on time.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::map::Record;
@@ -27,6 +28,15 @@ impl Truth {
             _ => Self::Unknown,
         }
     }
+
+    #[must_use]
+    pub fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::True, _) | (_, Self::True) => Self::True,
+            (Self::False, Self::False) => Self::False,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 impl std::ops::Not for Truth {
@@ -41,32 +51,16 @@ impl std::ops::Not for Truth {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Predicate {
     Is(String, Value),
-    /// The field, an ISO 8601 date or datetime, starts before this date. Comparing the text is
-    /// right as long as both sides begin with `YYYY-MM-DD`.
-    Before(String, String),
     Not(Box<Predicate>),
     And(Vec<Predicate>),
+    Or(Vec<Predicate>),
 }
 
 impl Predicate {
-    #[must_use]
-    pub fn is(field: &str, value: impl Into<Value>) -> Self {
-        Self::Is(field.to_owned(), value.into())
-    }
-
-    #[must_use]
-    pub fn before(field: &str, date: &str) -> Self {
-        Self::Before(field.to_owned(), date.to_owned())
-    }
-
-    #[must_use]
-    pub fn negated(self) -> Self {
-        Self::Not(Box::new(self))
-    }
-
     #[must_use]
     pub fn eval(&self, record: &Record) -> Truth {
         match self {
@@ -74,15 +68,12 @@ impl Predicate {
                 .fields
                 .get(field)
                 .map_or(Truth::Unknown, |value| Truth::from_bool(value == expected)),
-            Self::Before(field, date) => match record.fields.get(field).and_then(Value::as_str) {
-                Some(value) => {
-                    Truth::from_bool(value.get(..date.len()).unwrap_or(value) < date.as_str())
-                }
-                None => Truth::Unknown,
-            },
             Self::Not(inner) => !inner.eval(record),
             Self::And(predicates) => predicates.iter().fold(Truth::True, |truth, predicate| {
                 truth.and(predicate.eval(record))
+            }),
+            Self::Or(predicates) => predicates.iter().fold(Truth::False, |truth, predicate| {
+                truth.or(predicate.eval(record))
             }),
         }
     }
@@ -109,37 +100,58 @@ mod tests {
         }
     }
 
-    #[test]
-    fn no_due_date_is_neither_overdue_nor_on_time() {
-        let overdue = Predicate::before("due", "2026-11-08");
-        assert_eq!(
-            overdue.eval(&record(json!({ "due": "2026-11-07" }))),
-            Truth::True
-        );
-        assert_eq!(
-            overdue.eval(&record(json!({ "due": "2026-11-08" }))),
-            Truth::False
-        );
-        assert_eq!(overdue.eval(&record(json!({}))), Truth::Unknown);
-        assert_eq!(overdue.negated().eval(&record(json!({}))), Truth::Unknown);
+    fn is(field: &str, value: Value) -> Predicate {
+        Predicate::Is(field.to_owned(), value)
     }
 
     #[test]
-    fn a_datetime_on_the_day_itself_is_not_before_it() {
-        let overdue = Predicate::before("due", "2026-11-08");
+    fn absent_is_not_false() {
+        let overdue = is("overdue", json!(true));
         assert_eq!(
-            overdue.eval(&record(json!({ "due": "2026-11-08T09:00:00Z" }))),
+            overdue.eval(&record(json!({ "overdue": true }))),
+            Truth::True
+        );
+        assert_eq!(
+            overdue.eval(&record(json!({ "overdue": false }))),
             Truth::False
+        );
+        assert_eq!(overdue.eval(&record(json!({}))), Truth::Unknown);
+        assert_eq!(
+            Predicate::Not(Box::new(overdue)).eval(&record(json!({}))),
+            Truth::Unknown
         );
     }
 
     #[test]
     fn and_is_false_as_soon_as_one_side_is_false() {
-        let both = Predicate::And(vec![Predicate::is("a", true), Predicate::is("b", true)]);
+        let both = Predicate::And(vec![is("a", json!(true)), is("b", json!(true))]);
         assert_eq!(both.eval(&record(json!({ "a": false }))), Truth::False);
         assert_eq!(both.eval(&record(json!({ "a": true }))), Truth::Unknown);
         assert_eq!(
             both.eval(&record(json!({ "a": true, "b": true }))),
+            Truth::True
+        );
+    }
+
+    #[test]
+    fn or_is_true_as_soon_as_one_side_is_true() {
+        let either = Predicate::Or(vec![is("a", json!(true)), is("b", json!(true))]);
+        assert_eq!(either.eval(&record(json!({ "a": true }))), Truth::True);
+        assert_eq!(either.eval(&record(json!({ "a": false }))), Truth::Unknown);
+        assert_eq!(
+            either.eval(&record(json!({ "a": false, "b": false }))),
+            Truth::False
+        );
+    }
+
+    #[test]
+    fn a_predicate_is_data() {
+        let parsed: Predicate = serde_json::from_value(
+            json!({ "and": [{ "is": ["a", true] }, { "not": { "is": ["b", 1] } }] }),
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.eval(&record(json!({ "a": true, "b": 2 }))),
             Truth::True
         );
     }

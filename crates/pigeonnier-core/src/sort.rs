@@ -1,42 +1,38 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The fourth step: order records. Where absent values go is the key's choice, whatever the order.
+//! The sort step: order records. Where absent values go is the key's choice, whatever the order.
 
 use std::cmp::Ordering;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::map::Record;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Order {
-    Ascending,
-    Descending,
+    Asc,
+    Desc,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum Absent {
     First,
+    #[default]
     Last,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SortKey {
     pub field: String,
     pub order: Order,
+    #[serde(default)]
     pub absent: Absent,
 }
 
 impl SortKey {
-    #[must_use]
-    pub fn new(field: &str, order: Order, absent: Absent) -> Self {
-        Self {
-            field: field.to_owned(),
-            order,
-            absent,
-        }
-    }
-
     fn compare(&self, left: &Record, right: &Record) -> Ordering {
         match (left.fields.get(&self.field), right.fields.get(&self.field)) {
             (None, None) => Ordering::Equal,
@@ -47,8 +43,8 @@ impl SortKey {
             (Some(left), Some(right)) => {
                 let ordering = compare_values(left, right);
                 match self.order {
-                    Order::Ascending => ordering,
-                    Order::Descending => ordering.reverse(),
+                    Order::Asc => ordering,
+                    Order::Desc => ordering.reverse(),
                 }
             }
         }
@@ -105,6 +101,14 @@ mod tests {
             .collect()
     }
 
+    fn key(order: Order) -> SortKey {
+        SortKey {
+            field: "due".to_owned(),
+            order,
+            absent: Absent::Last,
+        }
+    }
+
     #[test]
     fn absent_stays_last_in_both_orders() {
         let mut records = [
@@ -112,15 +116,9 @@ mod tests {
             record("late", Some(json!("2026-12-01"))),
             record("soon", Some(json!("2026-11-10"))),
         ];
-        sort(
-            &mut records,
-            &[SortKey::new("due", Order::Ascending, Absent::Last)],
-        );
+        sort(&mut records, &[key(Order::Asc)]);
         assert_eq!(ids(&records), ["soon", "late", "none"]);
-        sort(
-            &mut records,
-            &[SortKey::new("due", Order::Descending, Absent::Last)],
-        );
+        sort(&mut records, &[key(Order::Desc)]);
         assert_eq!(ids(&records), ["late", "soon", "none"]);
     }
 }
