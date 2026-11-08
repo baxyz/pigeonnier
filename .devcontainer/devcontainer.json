@@ -20,7 +20,7 @@
     "ghcr.io/helpers4/devcontainer/github-dev:1": {},
     "ghcr.io/helpers4/devcontainer/auto-header:1": {
       "projectName": "pigeonnier",
-      "license": "AGPL-3.0-only"
+      "license": "AGPL-3.0-or-later"
     },
     // ── AI ───────────────────────────────────────────────────────────────────
     "ghcr.io/helpers4/devcontainer/claude-dev:1": {
