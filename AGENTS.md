@@ -11,10 +11,10 @@ Todoist tasks by project. [docs/spec.md](docs/spec.md) holds the design and the 
 
 ## License
 
-**AGPL-3.0-only**, the workspace default. Every source file starts with an SPDX header:
+**AGPL-3.0-or-later**, like Folioscope. Every source file starts with an SPDX header:
 
 ```rust
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 ```
 
 `cargo deny` enforces the allowed dependency licenses.

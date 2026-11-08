@@ -19,4 +19,4 @@ The GitHub token comes from `gh auth token`, which returns `GH_TOKEN` when that 
 
 ## License
 
-[AGPL-3.0-only](LICENSE).
+[AGPL-3.0-or-later](LICENSE).

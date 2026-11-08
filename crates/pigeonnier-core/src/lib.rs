@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! The steps that turn remote services into a list: [`source`] fetches, [`map`] aligns field names,
 //! [`filter`] selects, [`sort`] orders. [`view`] composes them.

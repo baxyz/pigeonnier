@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! The third step: select records. An absent field makes a predicate [`Truth::Unknown`], so a task
 //! with no due date is neither overdue nor on time.
