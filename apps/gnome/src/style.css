@@ -1,0 +1,8 @@
+.flag { font-weight: 700; font-size: 0.85em; min-width: 1.6em; }
+.flag-red { color: #e01b24; }
+.flag-orange { color: #e66100; }
+.flag-blue { color: #3584e4; }
+.flag-none { color: transparent; }
+.state-badge { font-size: 0.85em; padding: 0 6px; border-radius: 6px; background: alpha(currentColor, 0.1); }
+.waiting { opacity: 0.55; }
+.project-dot { font-size: 0.8em; }

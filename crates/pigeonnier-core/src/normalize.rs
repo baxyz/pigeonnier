@@ -225,9 +225,11 @@ pub fn pull_request(raw: &RawItem, kind: Kind, context: &Context<'_>) -> Item {
         context: format!("{}#{number}", record.text("repo_name").unwrap_or(repo)),
         url: record.text("url").unwrap_or_default().to_owned(),
         priority,
+        // A milestone is due on a day; the time GitHub attaches to it means nothing.
         due: record
             .text("due")
-            .and_then(|text| parse_due(text, *context.now.offset())),
+            .and_then(|text| NaiveDate::parse_from_str(text.get(..10)?, "%Y-%m-%d").ok())
+            .map(Due::Date),
         deadline: None,
         state,
         updated_at: record
@@ -515,6 +517,18 @@ mod tests {
     fn unknown_mergeability_triggers_nothing() {
         let item = normalize_pr(&json!({ "mergeable": "UNKNOWN" }), Kind::MyPr);
         assert_eq!(item.state, State::Waiting);
+    }
+
+    #[test]
+    fn a_milestone_is_due_on_a_day() {
+        let item = normalize_pr(
+            &json!({ "milestone": { "dueOn": "2026-11-20T08:00:00Z" } }),
+            Kind::MyPr,
+        );
+        assert_eq!(
+            item.due,
+            Some(Due::Date(NaiveDate::from_ymd_opt(2026, 11, 20).unwrap()))
+        );
     }
 
     #[test]
