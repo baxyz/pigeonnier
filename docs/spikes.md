@@ -15,7 +15,7 @@ baxyz devcontainer. This file records counts and field names only, never the tit
 To finish the two open spikes:
 
 ```bash
-# Needs a token that may read the project (see "Token reach")
+# Needs a fine-grained token owned by helpers4 with the organization permission Projects: Read
 GH_TOKEN=… cargo run -p pigeonnier-core --example gh_project -- helpers4 1
 # TODOIST_WAIT_SECS leaves time to change a task by hand before the incremental sync
 TODOIST_TOKEN=… TODOIST_WAIT_SECS=60 cargo run -p pigeonnier-core --example todoist_sync
@@ -53,6 +53,12 @@ This is the finding most likely to change the design.
   could not be read. brig-id and tuxery behave the same.
 - `ProjectRead` keeps the three outcomes apart, and the UI must say "no permission" for the `null` case
   rather than showing an empty roadmap.
+- GitHub's [Projects permission for fine-grained tokens](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
+  exists for organizations only, and
+  [its token documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+  lists user-owned projects as a known gap. `GET /users/baxyz/projectsV2` answers 403 "Resource not
+  accessible by personal access token". So a project owned by an account, like the spec's "Perso", needs
+  a classic or OAuth token with `read:project`.
 - A fine-grained PAT has a single resource owner, so the spec's plan B (paste a fine-grained PAT) cannot
   cover several organizations' projects. Plan B should say a classic token, or be dropped. Searches may
   also miss private PRs of other owners without saying so; this sample had none to check with.
