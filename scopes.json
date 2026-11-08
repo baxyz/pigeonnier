@@ -1,0 +1,12 @@
+[
+  "core",
+  "daemon",
+  "spike",
+  "build",
+  "test",
+  "docs",
+  "deps",
+  "devcontainer",
+  "ci",
+  "ai"
+]

@@ -1,0 +1,17 @@
+# Rust
+target
+
+# Editors
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea
+.DS_Store
+.history
+
+# Local env
+.env
+.env.local
+
+# AI agent worktrees
+.claude/worktrees/
