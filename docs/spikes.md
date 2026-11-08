@@ -73,7 +73,8 @@ All the fields the spec lists exist on `PullRequest`, including `statusCheckRoll
 
 - **`reviewDecision` was `null` on every PR seen.** It stays empty on repositories that do not require
   reviews. The spec's "to merge" state needs `APPROVED`, so those PRs would never reach it and would stay
-  "waiting" forever. To decide for M1: count `null` as approved for my own green and mergeable PRs?
+  "waiting" forever. **Decided for M1:** on those repositories, my own PR with green CI and no conflict
+  shows as "to merge", with no approval needed.
 - **`mergeable` is computed lazily.** The only PR in the review search read `UNKNOWN` on one query and `MERGEABLE` on a later
   one. `UNKNOWN` must keep the previous state: it is neither "conflicts" nor "to merge", and must not
   trigger a notification.
