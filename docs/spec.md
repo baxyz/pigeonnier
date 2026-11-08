@@ -82,7 +82,7 @@ todoist = { section = "Sunny Tech" }
 
 ## Sources de données
 
-Tout tient en **4 appels réseau par rafraîchissement, quel que soit le nombre de repos** : 2 recherches GitHub globales pour les PR, 1 requête par GitHub Project pour la roadmap, 1 sync incrémentale Todoist. Le routage vers les projets se fait ensuite en local.
+Le nombre d'appels réseau par rafraîchissement **ne dépend pas du nombre de repos** : 2 recherches GitHub globales pour les PR, 1 requête par page de GitHub Project pour la roadmap, 1 sync incrémentale Todoist. Le routage vers les projets se fait ensuite en local.
 
 ### PR à traiter (GitHub GraphQL, API Search)
 
@@ -94,7 +94,7 @@ Deux recherches globales, **sans filtre d'org** : l'owner de chaque PR décide d
 | Mes PR | `is:pr is:open archived:false author:@me` | Mes PR ouvertes, actionnables ou non |
 | Assignées (option) | `is:pr is:open archived:false assignee:@me -author:@me` | PR d'autres qu'on m'a assignées |
 
-Champs lus par PR : `number`, `title`, `url`, `isDraft`, `updatedAt`, `createdAt`, `repository { nameWithOwner owner { login } }`, `reviewDecision`, `mergeable`, `statusCheckRollup { state }`, `labels`, `milestone { dueOn }`.
+Champs lus par PR : `id`, `number`, `title`, `url`, `isDraft`, `updatedAt`, `createdAt`, `repository { name nameWithOwner owner { login } }`, `reviewDecision`, `mergeable`, `statusCheckRollup { state }`, `labels`, `milestone { dueOn }`, `author { login __typename }` (pour regrouper les bots) et `timelineItems(REVIEW_REQUESTED_EVENT) { createdAt }` (pour la règle d'âge des reviews).
 
 **L'état « action requise »** est dérivé localement, du plus au moins urgent :
 
@@ -102,16 +102,18 @@ Champs lus par PR : `number`, `title`, `url`, `isDraft`, `updatedAt`, `createdAt
 2. Ma PR avec `CHANGES_REQUESTED` → *à corriger*
 3. Ma PR avec CI `FAILURE` ou `ERROR` → *CI rouge*
 4. Ma PR `CONFLICTING` → *conflits*
-5. Ma PR `APPROVED` + CI verte + `MERGEABLE` → *à merger*
+5. Ma PR `APPROVED`, ou sur un repo sans review requise (`reviewDecision` vide), + CI verte ou absente + `MERGEABLE` → *à merger*
 6. Ma PR en attente de review ou en draft → *en attente* (affichée en gris, pas de notif)
+
+`mergeable` vaut `UNKNOWN` tant que GitHub le calcule : la PR reste *en attente*, sans notification.
 
 Les PR de bots (Dependabot, Renovate) sont regroupées sur une ligne repliable « 7 mises à jour de dépendances » par projet, pour ne pas noyer le reste.
 
 ### Roadmap (GitHub Projects v2, GraphQL)
 
-Une requête par projet mappé, paginée par 100 items : `organization(login:) { projectV2(number:) { … } }` (ou `user(login:)` pour le compte perso).
+Une requête par projet mappé, paginée par 100 items : `repositoryOwner(login:) { ... on ProjectV2Owner { projectV2(number:) { … } } }`, qui sert aussi bien une org qu'un compte perso. GitHub répond `null` sans erreur pour un Project que le token ne peut pas lire, et `NOT_FOUND` pour un numéro inexistant : l'app le signale au lieu d'afficher une roadmap vide.
 
-- **Schéma des champs** lu une fois et mis en cache : champs `SingleSelect` (statut, priorité, avec leurs couleurs), `Date`, `Iteration`.
+- **Champs** : `SingleSelect` (statut, priorité), `Date`, `Iteration` (la fin d'itération se calcule : `startDate` + `duration`).
 - **Items** : `isArchived`, `content` (Issue, PullRequest ou DraftIssue, avec titre, URL, état, assignees), `fieldValues` (single-select, date, itération).
 - **Filtre** : items non archivés, contenu ouvert, statut hors « Done ». Option par projet : seulement les items qui me sont assignés.
 
@@ -128,22 +130,22 @@ only_assigned  = false
 
 ### Todoist (API v1, endpoint /sync)
 
-L'API v1 réunit les anciennes API REST et Sync sous une seule base, et `/sync` renvoie uniquement les changements depuis le dernier jeton ([source](https://freeapihub.com/apis/todoist-api)). Un seul appel suffit donc après la sync initiale.
+L'API v1 réunit les anciennes API REST et Sync sous une seule base, et `/sync` renvoie uniquement les changements depuis le dernier jeton ([doc officielle](https://developer.todoist.com/api/v1/)). Un seul appel suffit donc après la sync initiale.
 
 - **Appel** : `POST https://api.todoist.com/api/v1/sync`, `resource_types=["items","sections","projects","labels"]`, `sync_token` persisté.
 - **Routage** : `item.section_id` → projet Pigeonnier via le mapping ; tâches du parent sans section → projet « Autres ».
 - **Actions manuelles de Claude** : tâches portant le label `claude`. C'est une convention à fixer côté Claude, par une ligne dans tes instructions ou un `CLAUDE.md` (« toute action manuelle créée dans Todoist porte le label `claude` et va dans la section du projet »).
 - **Champs lus** : `content`, `description`, `priority`, `due` (date ou datetime, récurrence), `deadline`, `labels`, `checked`.
-- **Piège** : l'API code la priorité de 1 (normale) à 4 (urgente), à l'inverse de l'affichage P1…P4 dans l'app ([source](https://pkg.go.dev/github.com/smirnoffmg/go-todoist@v0.1.0)).
+- **Piège** : l'API code la priorité de 1 (normale) à 4 (urgente), à l'inverse de l'affichage P1…P4 dans l'app ([doc officielle](https://developer.todoist.com/api/v1/)).
 
 ### Budget d'appels
 
 | Source | Appels par rafraîchissement | Limite |
 | --- | --- | --- |
-| GitHub GraphQL | 2 recherches + 1 par Project (≈ 5 à 10 en tout) | 5 000 points par heure |
-| Todoist | 1 | 1 000 requêtes par 15 min ([source](https://freeapihub.com/apis/todoist-api)) |
+| GitHub GraphQL | 2 recherches (3 points chacune) + 1 par page de Project (2 points) | 5 000 points par heure |
+| Todoist | 1 | 1 000 syncs partielles et 100 syncs complètes par 15 min ([doc officielle](https://developer.todoist.com/api/v1/)) |
 
-Un rafraîchissement toutes les 5 minutes consomme une faible fraction de ces quotas. Un bouton et le focus de la fenêtre déclenchent aussi un rafraîchissement immédiat.
+Avec 5 projets, un rafraîchissement toutes les 5 minutes coûte environ 192 points par heure. Un bouton et le focus de la fenêtre déclenchent aussi un rafraîchissement immédiat.
 
 ## Modèle de données unifié
 
@@ -221,7 +223,8 @@ Aucun serveur de callback, aucun port local, ça marche aussi sur Android et der
 
 - **Scopes** : `repo` (PR des repos privés), `read:org` (liste des orgs), `read:project` (Projects v2).
 - **Raccourci** : si `gh` est installé et connecté, proposer « Utiliser le compte de GitHub CLI » (lecture de `gh auth token`). Zéro clic sur ligno et fajro.
-- **Plan B** : coller un fine-grained PAT.
+- **Plan B** : coller un token classique. Un fine-grained PAT ne convient pas : il n'a qu'un seul propriétaire, sa permission Projects n'existe que pour les orgs, et il ne lit donc ni les Projects de plusieurs orgs ni ceux d'un compte perso.
+- **Liste des orgs** : un token limité ne reçoit qu'une liste vide, sans erreur. La découverte automatique le signale.
 - **Point d'attention** : une org qui restreint les OAuth Apps tierces doit approuver l'app. Pas de souci pour tes propres orgs ; pour les autres, le raccourci `gh` ou un PAT contourne le problème.
 
 ### Todoist : OAuth avec redirection locale
@@ -230,9 +233,10 @@ Aucun serveur de callback, aucun port local, ça marche aussi sur Android et der
 2. Après accord, Todoist redirige vers `http://127.0.0.1:<port fixe>/callback`, où l'app écoute brièvement.
 3. L'app échange le code contre un token.
 
-- **Contrainte** : l'échange du code demande le client secret de l'app Todoist. Une app open source ne peut pas le cacher vraiment ; Planify, par exemple, vit avec. À vérifier en premier : le support de PKCE et d'une URL de redirection en loopback par Todoist.
-- **Plan B** : coller le token API personnel (Réglages Todoist → Intégrations → Développeur). C'est le plus simple pour un usage strictement personnel.
-- **Android** : redirection via un deep link `pigeonnier://callback` si Todoist l'accepte, sinon token collé.
+- **Par défaut pour l'instant** : le token API personnel (Réglages Todoist → Intégrations → Développeur), avec `pigeonnier login`. C'est le plus simple pour un usage strictement personnel, et il n'y a rien à rafraîchir.
+- **Plus tard** : Todoist accepte PKCE (S256) sans secret pour un client public, déclaré par enregistrement dynamique ou par un document de métadonnées hébergé en HTTPS. La doc exige des redirections HTTPS et n'autorise `localhost` que « pour les tests » : à essayer avec un vrai client avant de s'y fier.
+- **Durée des tokens OAuth** : 1 h pour les nouvelles apps, avec des refresh tokens à usage unique. Réutiliser un refresh token consommé plus de 60 s après révoque tous les tokens de l'app : un seul processus doit rafraîchir, et chaque appareil a sa propre autorisation.
+- **Android** : token collé, `pigeonnier://callback` étant probablement refusé.
 
 ### Stockage des secrets
 
@@ -271,7 +275,8 @@ Tauri est écarté de Linux parce que WebKitGTK est sa webview la plus lente. Su
 ### Découpage en crates et paquets
 
 - `crates/pigeonnier-core` (lib) : clients GitHub et Todoist, modèle `Item`, routage, tri, cache SQLite, view-models.
-- `crates/pigeonnierd` (bin, Linux) : boucle de sync, interface D-Bus, notifications, serveur MCP.
+- `crates/pigeonnier` (bin) : la CLI, et le serveur MCP (`pigeonnier mcp`).
+- `crates/pigeonnierd` (bin, Linux) : boucle de sync, interface D-Bus, notifications.
 - `apps/gnome` (Rust, Relm4, libadwaita) : client D-Bus du démon.
 - `apps/tauri` (Windows, Android) : UI web, cœur embarqué dans le processus.
 - `extensions/gnome` (GJS) : indicateur, menu, placement de la sidebar.
@@ -284,7 +289,7 @@ Tauri est écarté de Linux parce que WebKitGTK est sa webview la plus lente. Su
 | GraphQL typé | `cynic` ou `graphql_client`, schéma GitHub vendorisé |
 | Cache | `rusqlite` (SQLite) |
 | D-Bus | `zbus` |
-| Notifications Linux | `notify-rust` (actions incluses) |
+| Notifications Linux | `org.freedesktop.Notifications` via `zbus` (actions incluses) |
 | Secrets | `keyring` |
 | MCP | `rmcp` (SDK Rust officiel) |
 | UI GNOME | `gtk4-rs`, `libadwaita-rs`, Relm4 |
@@ -378,12 +383,15 @@ bus de session · nom : io.github.baxyz.Pigeonnier · objet : /io/github/baxyz/P
 
 interface io.github.baxyz.Pigeonnier1
   method  GetSnapshot() -> s                 # JSON : projets + items triés
+  method  GetView(s view) -> s               # idem pour une vue : all, action, today…
   method  Refresh()
   method  Complete(s item_id)                # Todoist seulement
   method  Snooze(s item_id, x until_unix)
   method  ShowWindow(s mode)                 # "sidebar" | "full"
   signal  Changed(u revision)
+  signal  WindowRequested(s mode)
   property Counts  a{s(uu)}                  # projet -> (action requise, en retard)
+  property Revision u
 ```
 
 ### Hors GNOME
@@ -419,7 +427,7 @@ La v1 reste en **lecture, plus deux écritures sans risque** (cocher et reporter
 ### Niveau 3 : pont avec Claude
 
 - **Liens PR ↔ tâche** : une tâche Todoist dont la description contient l'URL d'une PR s'affiche sous cette PR. Option : cocher la tâche automatiquement quand la PR est mergée.
-- **Pigeonnier comme serveur MCP** : le démon expose quelques outils à Claude, en local sur ligno et fajro :
+- **Pigeonnier comme serveur MCP** : `pigeonnier mcp` expose quelques outils à Claude, en local sur ligno et fajro :
   - `list_items(project?)` : ce qui t'attend, pour que Claude priorise avec toi ;
   - `add_manual_action(project, title, due?, priority?, pr_url?)` : crée la tâche Todoist dans la bonne section avec le label `claude`. La convention n'a plus besoin d'être rappelée à Claude, l'outil l'applique.
 - **« Confier à Claude »** sur une PR « CI rouge » ou « à corriger » : lance une session Claude Code sur fajro dans le devcontainer du repo, avec l'URL de la PR comme contexte. Le résultat revient sous forme de commit sur la PR, et éventuellement d'une action manuelle si Claude a besoin de toi.
@@ -452,7 +460,7 @@ Le risque le plus sous-estimé est **le mode sidebar sous Wayland** : une applic
 | Wayland interdit à l'app de placer sa fenêtre | Sidebar flottante au lieu d'être collée au bord | L'extension GNOME place et redimensionne la fenêtre (le Shell en a le droit) ; sans extension, simple fenêtre étroite |
 | Deux UI à maintenir (libadwaita et Tauri) | Chaque fonctionnalité visible écrite deux fois | View-models dans le cœur, UI sans logique métier |
 | Tauri mobile moins mûr pour l'arrière-plan | Sync et notifications Android fragiles | Petit plugin Kotlin (WorkManager) pour la sync périodique |
-| OAuth Todoist sans PKCE | Client secret embarqué dans une app open source | Vérifier la doc ; sinon token personnel collé par défaut |
+| Redirection OAuth Todoist à confirmer | Connexion OAuth impossible sur certaines cibles | Token personnel collé par défaut ; essayer PKCE et `localhost` avec un vrai client |
 | Reviews demandées à une team entière | Bruit dans « à reviewer » | Option : qualificatif `user-review-requested:@me` (demandes directes uniquement) |
 | Projects v2 aux champs hétérogènes | Priorités ou dates mal lues | Mapping des champs par projet, valeurs par défaut du template GitHub |
 | Android limite le travail en arrière-plan | Notifications retardées de 15 min ou plus | Sync à l'ouverture + tâche périodique ; pas de push sans serveur |
@@ -465,4 +473,4 @@ Le risque le plus sous-estimé est **le mode sidebar sous Wayland** : une applic
 - [ ] **Périmètre des PR** : inclure les PR assignées sans être auteur ? Les demandes de review adressées à une team ?
 - [ ] **Projet Todoist parent** : un seul projet (« Dev ») avec une section par org, ou plusieurs projets Todoist ?
 - [ ] **Nom** : tranché, ce sera Pigeonnier, et pigeonnier pour les identifiants techniques (crates, démon, CLI, D-Bus). L'org GitHub pigeonnier étant prise, le dépôt démarre en baxyz/pigeonnier.
-- [ ] **Licence** : AGPL comme Folioscope, ou GPL/MIT pour faciliter une diffusion sur Flathub et F-Droid ?
+- [x] **Licence** : AGPL-3.0-or-later, comme Folioscope.
