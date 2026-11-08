@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Pigeonnier
+Comment=What is waiting for you, project by project
+Comment[fr]=Ce qui t'attend, projet par projet
+Exec=@BINDIR@/pigeonnier-gnome
+Icon=mail-unread-symbolic
+Terminal=false
+Categories=Office;ProjectManagement;
+StartupNotify=true
+StartupWMClass=io.github.baxyz.Pigeonnier.Gnome
+Actions=sidebar;
+
+[Desktop Action sidebar]
+Name=Sidebar
+Exec=@BINDIR@/pigeonnier-gnome --sidebar

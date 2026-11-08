@@ -6,17 +6,26 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+  # Merged into zbus 6, which the project uses directly; these copies come from zbus 5 through
+  # secret-service, for the system keyring. Unmaintained, with no known flaw.
+  { id = "RUSTSEC-2026-0370", reason = "zvariant, through secret-service" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names, through secret-service" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, through secret-service" },
+]
 
 [licenses]
 version = 2
 allow = [
   "AGPL-3.0-or-later",
   "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
   "BSD-3-Clause",
   "CDLA-Permissive-2.0",
   "ISC",
   "MIT",
   "Unicode-3.0",
+  "Zlib",
 ]
 confidence-threshold = 0.9
 

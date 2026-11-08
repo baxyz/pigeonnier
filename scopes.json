@@ -1,7 +1,10 @@
 [
   "core",
+  "cli",
   "daemon",
-  "spike",
+  "gnome",
+  "extension",
+  "packaging",
   "build",
   "test",
   "docs",
