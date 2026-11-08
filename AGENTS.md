@@ -7,7 +7,7 @@ This repository inherits the [canonical workspace rules](https://github.com/baxy
 A local-first desktop companion that aggregates GitHub pull requests, GitHub Projects roadmaps and
 Todoist tasks by project. [docs/spec.md](docs/spec.md) holds the design and the milestones.
 
-**Status:** M0 (spike, no UI). Do not start M1 without the owner's agreement.
+**Status:** see the table in [README.md](README.md).
 
 ## License
 
@@ -23,12 +23,15 @@ Todoist tasks by project. [docs/spec.md](docs/spec.md) holds the design and the 
 
 Defined in `scopes.json`:
 
-| Scope                                                | Covers                                      |
-| ---------------------------------------------------- | ------------------------------------------- |
-| `core`                                               | `crates/pigeonnier-core/src`                |
-| `daemon`                                             | `crates/pigeonnierd`                        |
-| `spike`                                              | `crates/pigeonnier-core/examples`, `docs/spikes.md` |
-| `build`, `test`, `docs`, `deps`, `devcontainer`, `ci`, `ai` | As usual                             |
+| Scope                                                 | Covers                                 |
+| ----------------------------------------------------- | -------------------------------------- |
+| `core`                                                | `crates/pigeonnier-core`               |
+| `cli`                                                 | `crates/pigeonnier`, its MCP server    |
+| `daemon`                                              | `crates/pigeonnierd`                   |
+| `gnome`                                               | `apps/gnome`                           |
+| `extension`                                           | `extensions/gnome`                     |
+| `packaging`                                           | `packaging/`                           |
+| `build`, `test`, `docs`, `deps`, `devcontainer`, `ci`, `ai` | As usual                         |
 
 ## Structure
 
@@ -36,12 +39,14 @@ Defined in `scopes.json`:
 pigeonnier/
   crates/
     pigeonnier-core/   ← the pipeline, one module per step:
-                         source/ (GitHub, Todoist) → map → filter → sort, composed by view
-      examples/        ← exploration binaries of M0: gh_prs, gh_project, todoist_sync
-    pigeonnierd/       ← the Linux daemon, empty for now
-  docs/
-    spec.md            ← the design and the milestones
-    spikes.md          ← what the M0 spikes found
+                         source/ → map → normalize → filter → sort, with view and viewmodel;
+                         engine is the one interface the rest talks to
+    pigeonnier/        ← the CLI and the MCP server
+    pigeonnierd/       ← the Linux daemon: sync loop, D-Bus, notifications
+  apps/gnome/          ← the window (Relm4, libadwaita): a D-Bus client with no logic of its own
+  extensions/gnome/    ← the GNOME Shell extension (GJS); model.js has no GNOME import, so it is tested with Node
+  packaging/           ← systemd, D-Bus and desktop files, install.sh
+  docs/spec.md         ← the design and the milestones
 ```
 
 ## Commands
@@ -51,12 +56,19 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo deny check
+node --test extensions/gnome/
 ```
+
+To see the window without a desktop, run it under `Xvfb` with `GDK_BACKEND=x11 GSK_RENDERER=cairo`,
+next to `pigeonnierd` in a `dbus-run-session`. `PIGEONNIER_GITHUB_API` and `PIGEONNIER_TODOIST_API`
+point the daemon at made-up services.
 
 ## Rules
 
-- **Keep the steps separate.** A source only fetches, `map` only renames, `filter` only selects,
-  `sort` only orders. Mappings, predicates and sort keys are values, not code paths.
+- **Keep the steps separate.** A source only fetches, `map` only renames, `normalize` applies the
+  rules of each kind of item, `filter` only selects, `sort` only orders. Mappings, predicates and
+  sort keys are values, not code paths.
+- **View-models live in the core.** A UI draws and sends actions; a new state or sort rule must not
+  touch it.
 - **Absent is not false.** A missing field makes a predicate `Unknown`, never `False`.
-- **No token or personal data in the repository.** `docs/spikes.md` records counts and field names,
-  never titles of private work. Tests use made-up payloads.
+- **No token or personal data in the repository.** Tests use made-up payloads.
