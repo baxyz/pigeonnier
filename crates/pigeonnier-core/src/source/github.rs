@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! GitHub GraphQL: pull request search and Projects v2.
+//! GitHub GraphQL: pull request search, Projects v2 and the discovery of owners.
 
-use std::fmt::Write as _;
 use std::process::Command;
 
 use serde_json::{Map, Value, json};
@@ -13,49 +12,37 @@ const ENDPOINT: &str = "https://api.github.com/graphql";
 const SOURCE_PR: &str = "github:pull_request";
 const SOURCE_PROJECT_ITEM: &str = "github:project_item";
 
-/// The fields the spec lists, plus the `id` provenance needs.
 const PR_FIELDS: &str = "
     id number title url isDraft updatedAt createdAt reviewDecision mergeable
-    repository { nameWithOwner owner { login } }
+    repository { name nameWithOwner owner { login } }
     statusCheckRollup { state }
     labels(first: 20) { nodes { name } }
-    milestone { dueOn }";
-
-/// What the spec's rules need but its field list leaves out: the author's type for grouping bots,
-/// the requested reviewers for telling a team from a person, the request date for the age rule.
-const PR_EXTRA_FIELDS: &str = "
+    milestone { dueOn }
     author { login __typename }
-    reviewRequests(first: 20) { nodes { requestedReviewer { __typename } } }
     timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 20) {
       nodes { ... on ReviewRequestedEvent { createdAt } }
     }";
 
 const PROJECT_QUERY: &str = "
 query($owner: String!, $number: Int!, $after: String) {
-  rateLimit { cost remaining }
   repositoryOwner(login: $owner) {
     ... on ProjectV2Owner {
       projectV2(number: $number) {
         id title closed
-        fields(first: 50) {
-          nodes {
-            __typename
-            ... on ProjectV2FieldCommon { name dataType }
-            ... on ProjectV2SingleSelectField { options { name color } }
-            ... on ProjectV2IterationField {
-              configuration { iterations { title startDate duration } }
-            }
-          }
-        }
         items(first: 100, after: $after) {
-          totalCount
           pageInfo { hasNextPage endCursor }
           nodes {
             id isArchived updatedAt type
             content {
               __typename
-              ... on Issue { title url state assignees(first: 10) { nodes { login } } }
-              ... on PullRequest { title url state assignees(first: 10) { nodes { login } } }
+              ... on Issue {
+                title url state number repository { name }
+                assignees(first: 10) { nodes { login } }
+              }
+              ... on PullRequest {
+                title url state number repository { name }
+                assignees(first: 10) { nodes { login } }
+              }
               ... on DraftIssue { title assignees(first: 10) { nodes { login } } }
             }
             fieldValues(first: 20) {
@@ -79,88 +66,55 @@ query($owner: String!, $number: Int!, $after: String) {
   }
 }";
 
-/// Which fields a pull request search asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrFields {
-    Spec,
-    Extended,
-}
-
-impl PrFields {
-    fn selection(self) -> String {
-        match self {
-            Self::Spec => PR_FIELDS.to_owned(),
-            Self::Extended => format!("{PR_FIELDS}{PR_EXTRA_FIELDS}"),
-        }
-    }
-}
-
-/// The price of what was fetched, summed over its pages.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Cost {
-    pub requests: u32,
-    pub points: u64,
-    pub remaining: u64,
-}
-
-impl Cost {
-    fn add(&mut self, data: &Value) {
-        self.requests += 1;
-        self.points += data
-            .pointer("/rateLimit/cost")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        self.remaining = data
-            .pointer("/rateLimit/remaining")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PrSearch {
-    pub issue_count: u64,
-    pub items: Vec<RawItem>,
-    pub cost: Cost,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProjectSnapshot {
-    pub title: String,
-    pub closed: bool,
-    pub total_count: u64,
-    pub fields: Vec<Value>,
-    pub items: Vec<RawItem>,
-}
-
 /// GitHub answers `null` with no error for a project the token may not read, and `NOT_FOUND` for a
 /// number that does not exist. The difference is the only way to tell a permission problem.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectRead {
-    Found(Box<ProjectSnapshot>),
+    Found(Vec<Value>),
     Inaccessible,
     NotFound,
+}
+
+/// An owner the signed-in user can see, with the project to use for it if there is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Owner {
+    pub login: String,
+    pub projects: Vec<OwnerProject>,
+}
+
+/// A project of an owner; projects come most recently updated first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerProject {
+    pub number: u32,
+    pub title: String,
 }
 
 pub struct GithubClient {
     http: reqwest::Client,
     token: String,
+    endpoint: String,
 }
 
 impl GithubClient {
     #[must_use]
     pub fn new(token: String) -> Self {
+        Self::with_endpoint(token, ENDPOINT.to_owned())
+    }
+
+    #[must_use]
+    pub fn with_endpoint(token: String, endpoint: String) -> Self {
         Self {
             http: reqwest::Client::new(),
             token,
+            endpoint,
         }
     }
 
-    /// Builds a client with the token of `gh auth token`.
+    /// The token of `gh auth token`.
     ///
     /// # Errors
     /// [`SourceError::MissingToken`] when `gh` is missing, fails, or prints nothing.
-    pub fn from_gh_cli() -> Result<Self, SourceError> {
+    pub fn token_from_gh_cli() -> Result<String, SourceError> {
         let output = Command::new("gh")
             .args(["auth", "token"])
             .output()
@@ -171,7 +125,7 @@ impl GithubClient {
                 String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             ));
         }
-        Ok(Self::new(token))
+        Ok(token)
     }
 
     /// Runs one query and returns `data` with the errors GitHub reported next to it.
@@ -182,7 +136,7 @@ impl GithubClient {
     ) -> Result<(Value, Vec<Value>), SourceError> {
         let response = self
             .http
-            .post(ENDPOINT)
+            .post(&self.endpoint)
             .bearer_auth(&self.token)
             .header(reqwest::header::USER_AGENT, "pigeonnier")
             .json(&json!({ "query": query, "variables": variables }))
@@ -199,31 +153,34 @@ impl GithubClient {
         }
     }
 
+    /// The login behind the token, which is what `@me` means in the configuration.
+    ///
+    /// # Errors
+    /// Any HTTP or GraphQL failure.
+    pub async fn viewer_login(&self) -> Result<String, SourceError> {
+        let (data, _) = self
+            .request("query { viewer { login } }", json!({}))
+            .await?;
+        data.pointer("/viewer/login")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| SourceError::Shape("no viewer login".to_owned()))
+    }
+
     /// Runs one search and follows its pages.
     ///
     /// # Errors
     /// Any HTTP or GraphQL failure, including a partial answer: a search with holes would hide work.
-    pub async fn search_pull_requests(
-        &self,
-        search: &str,
-        fields: PrFields,
-    ) -> Result<PrSearch, SourceError> {
-        let selection = fields.selection();
+    pub async fn search_pull_requests(&self, search: &str) -> Result<Vec<Value>, SourceError> {
         let query = format!(
             "query($q: String!, $after: String) {{
-               rateLimit {{ cost remaining }}
                search(type: ISSUE, first: 100, query: $q, after: $after) {{
-                 issueCount
                  pageInfo {{ hasNextPage endCursor }}
-                 nodes {{ ... on PullRequest {{ {selection} }} }}
+                 nodes {{ ... on PullRequest {{ {PR_FIELDS} }} }}
                }}
              }}"
         );
-        let mut result = PrSearch {
-            issue_count: 0,
-            items: Vec::new(),
-            cost: Cost::default(),
-        };
+        let mut items = Vec::new();
         let mut after = Value::Null;
         loop {
             let variables = json!({ "q": search, "after": after });
@@ -231,103 +188,93 @@ impl GithubClient {
             if !errors.is_empty() {
                 return Err(SourceError::GraphQl(error_messages(&errors)));
             }
-            result.cost.add(&data);
             let page = &data["search"];
-            result.issue_count = page["issueCount"].as_u64().unwrap_or(0);
-            let nodes = page["nodes"].as_array().map_or(&[][..], Vec::as_slice);
-            result.items.extend(nodes.iter().map(raw_pull_request));
-            match next_cursor(page) {
-                Some(cursor) => after = cursor,
-                None => return Ok(result),
-            }
+            items.extend(page["nodes"].as_array().into_iter().flatten().cloned());
+            let Some(cursor) = next_cursor(page) else {
+                return Ok(items);
+            };
+            after = cursor;
         }
     }
 
-    /// Runs several searches in one request, to compare with one request per search.
-    ///
-    /// # Errors
-    /// Any HTTP or GraphQL failure.
-    pub async fn count_in_one_request(
-        &self,
-        searches: &[&str],
-        fields: PrFields,
-    ) -> Result<(Vec<u64>, Cost), SourceError> {
-        let selection = fields.selection();
-        let mut aliases = String::new();
-        for (index, search) in searches.iter().enumerate() {
-            write!(
-                aliases,
-                "s{index}: search(type: ISSUE, first: 100, query: {search:?}) {{
-                   issueCount
-                   nodes {{ ... on PullRequest {{ {selection} }} }}
-                 }}\n"
-            )
-            .expect("writing to a String cannot fail");
-        }
-        let query = format!("query {{ rateLimit {{ cost remaining }} {aliases} }}");
-        let (data, errors) = self.request(&query, json!({})).await?;
-        if !errors.is_empty() {
-            return Err(SourceError::GraphQl(error_messages(&errors)));
-        }
-        let mut cost = Cost::default();
-        cost.add(&data);
-        let counts = (0..searches.len())
-            .map(|index| {
-                data[format!("s{index}")]["issueCount"]
-                    .as_u64()
-                    .unwrap_or(0)
-            })
-            .collect();
-        Ok((counts, cost))
-    }
-
-    /// Reads a project and all its items. `repositoryOwner` serves both organizations and users.
+    /// Reads all the items of a project. `repositoryOwner` serves both organizations and users.
     ///
     /// # Errors
     /// Any HTTP failure, or a GraphQL error other than the `NOT_FOUND` of [`ProjectRead`].
-    pub async fn read_project(
-        &self,
-        owner: &str,
-        number: u32,
-    ) -> Result<(ProjectRead, Cost), SourceError> {
-        let mut cost = Cost::default();
+    pub async fn read_project(&self, owner: &str, number: u32) -> Result<ProjectRead, SourceError> {
+        let mut items = Vec::new();
         let mut after = Value::Null;
-        let mut snapshot: Option<ProjectSnapshot> = None;
         loop {
             let variables = json!({ "owner": owner, "number": number, "after": after });
             let (data, errors) = self.request(PROJECT_QUERY, variables).await?;
-            cost.add(&data);
             if errors.iter().any(|error| error["type"] == "NOT_FOUND") {
-                return Ok((ProjectRead::NotFound, cost));
+                return Ok(ProjectRead::NotFound);
             }
             if !errors.is_empty() {
                 return Err(SourceError::GraphQl(error_messages(&errors)));
             }
             let project = &data["repositoryOwner"]["projectV2"];
             if project.is_null() {
-                return Ok((ProjectRead::Inaccessible, cost));
+                return Ok(ProjectRead::Inaccessible);
             }
             let page = &project["items"];
-            let result = snapshot.get_or_insert_with(|| ProjectSnapshot {
-                title: project["title"].as_str().unwrap_or_default().to_owned(),
-                closed: project["closed"].as_bool().unwrap_or(false),
-                total_count: page["totalCount"].as_u64().unwrap_or(0),
-                fields: project
-                    .pointer("/fields/nodes")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default(),
-                items: Vec::new(),
-            });
-            let nodes = page["nodes"].as_array().map_or(&[][..], Vec::as_slice);
-            result.items.extend(nodes.iter().map(raw_project_item));
+            items.extend(page["nodes"].as_array().into_iter().flatten().cloned());
             let Some(cursor) = next_cursor(page) else {
-                let found = snapshot.ok_or_else(|| SourceError::Shape("no page".to_owned()))?;
-                return Ok((ProjectRead::Found(Box::new(found)), cost));
+                return Ok(ProjectRead::Found(items));
             };
             after = cursor;
         }
     }
+
+    /// The signed-in user and the organizations they belong to, with their projects.
+    ///
+    /// # Errors
+    /// Any HTTP or GraphQL failure. A token that may not list organizations gets an empty list from
+    /// GitHub rather than an error, so an empty result is not a proof that there are none.
+    pub async fn discover_owners(&self) -> Result<Vec<Owner>, SourceError> {
+        const PROJECTS: &str =
+            "projectsV2(first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+            nodes { number title closed }
+        }";
+        let query = format!(
+            "query {{
+               viewer {{
+                 login {PROJECTS}
+                 organizations(first: 100) {{ nodes {{ login {PROJECTS} }} }}
+               }}
+             }}"
+        );
+        let (data, errors) = self.request(&query, json!({})).await?;
+        if data["viewer"].is_null() {
+            return Err(SourceError::GraphQl(error_messages(&errors)));
+        }
+        let viewer = &data["viewer"];
+        let organizations = viewer
+            .pointer("/organizations/nodes")
+            .and_then(Value::as_array);
+        Ok(std::iter::once(viewer)
+            .chain(organizations.into_iter().flatten())
+            .filter_map(owner_from_node)
+            .collect())
+    }
+}
+
+fn owner_from_node(node: &Value) -> Option<Owner> {
+    let projects = node.pointer("/projectsV2/nodes").and_then(Value::as_array);
+    Some(Owner {
+        login: node["login"].as_str()?.to_owned(),
+        projects: projects
+            .into_iter()
+            .flatten()
+            .filter(|project| project["closed"] != Value::Bool(true))
+            .filter_map(|project| {
+                Some(OwnerProject {
+                    number: u32::try_from(project["number"].as_u64()?).ok()?,
+                    title: project["title"].as_str()?.to_owned(),
+                })
+            })
+            .collect(),
+    })
 }
 
 fn next_cursor(page: &Value) -> Option<Value> {
@@ -352,16 +299,22 @@ fn provenance(source: &'static str, node: &Value) -> Provenance {
     }
 }
 
-fn raw_pull_request(node: &Value) -> RawItem {
+#[must_use]
+pub fn raw_pull_request(node: &Value) -> RawItem {
     RawItem {
         provenance: provenance(SOURCE_PR, node),
         payload: node.clone(),
     }
 }
 
-fn raw_project_item(node: &Value) -> RawItem {
+/// A draft issue has no `state` because it can only be open; saying so here keeps the rules simple.
+#[must_use]
+pub fn raw_project_item(node: &Value) -> RawItem {
     let mut payload = node.clone();
     payload["fields"] = flatten_field_values(node);
+    if node.pointer("/content/__typename").and_then(Value::as_str) == Some("DraftIssue") {
+        payload["content"]["state"] = json!("OPEN");
+    }
     RawItem {
         provenance: provenance(SOURCE_PROJECT_ITEM, node),
         payload,
@@ -374,7 +327,7 @@ fn raw_project_item(node: &Value) -> RawItem {
 pub fn flatten_field_values(item: &Value) -> Value {
     let mut fields = Map::new();
     let nodes = item.pointer("/fieldValues/nodes").and_then(Value::as_array);
-    for node in nodes.map_or(&[][..], Vec::as_slice) {
+    for node in nodes.into_iter().flatten() {
         if let Some(name) = node.pointer("/field/name").and_then(Value::as_str) {
             fields.insert(name.to_owned(), node.clone());
         }
@@ -402,10 +355,28 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_issue_is_open() {
+        let raw =
+            raw_project_item(&json!({ "id": "x", "content": { "__typename": "DraftIssue" } }));
+        assert_eq!(raw.payload["content"]["state"], "OPEN");
+    }
+
+    #[test]
     fn the_last_page_has_no_cursor() {
         let last = json!({ "pageInfo": { "hasNextPage": false, "endCursor": "abc" } });
         let more = json!({ "pageInfo": { "hasNextPage": true, "endCursor": "abc" } });
         assert_eq!(next_cursor(&last), None);
         assert_eq!(next_cursor(&more), Some(json!("abc")));
+    }
+
+    #[test]
+    fn closed_projects_are_not_proposed() {
+        let owner = owner_from_node(&json!({ "login": "acme", "projectsV2": { "nodes": [
+            { "number": 2, "title": "Old", "closed": true },
+            { "number": 3, "title": "Roadmap", "closed": false },
+        ] } }));
+        let owner = owner.unwrap();
+        assert_eq!(owner.projects.len(), 1);
+        assert_eq!(owner.projects[0].number, 3);
     }
 }

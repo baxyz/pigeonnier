@@ -1,0 +1,43 @@
+[
+  {
+    "id": "all",
+    "title": "Tout",
+    "filter": { "is": ["snoozed", false] },
+    "sort": [
+      { "field": "waiting", "order": "asc" },
+      { "field": "overdue_rank", "order": "desc" },
+      { "field": "priority", "order": "asc" },
+      { "field": "effective_due", "order": "asc" },
+      { "field": "updated", "order": "desc" }
+    ]
+  },
+  {
+    "id": "action",
+    "title": "Action requise",
+    "filter": { "and": [{ "is": ["snoozed", false] }, { "is": ["action_required", true] }] },
+    "sort": [
+      { "field": "waiting", "order": "asc" },
+      { "field": "overdue_rank", "order": "desc" },
+      { "field": "priority", "order": "asc" },
+      { "field": "effective_due", "order": "asc" },
+      { "field": "updated", "order": "desc" }
+    ]
+  },
+  {
+    "id": "today",
+    "title": "Aujourd'hui",
+    "filter": {
+      "and": [
+        { "is": ["snoozed", false] },
+        { "or": [{ "is": ["overdue", true] }, { "is": ["due_today", true] }] }
+      ]
+    },
+    "sort": [
+      { "field": "waiting", "order": "asc" },
+      { "field": "overdue_rank", "order": "desc" },
+      { "field": "priority", "order": "asc" },
+      { "field": "effective_due", "order": "asc" },
+      { "field": "updated", "order": "desc" }
+    ]
+  }
+]

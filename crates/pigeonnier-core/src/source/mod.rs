@@ -5,10 +5,11 @@
 pub mod github;
 pub mod todoist;
 
+use serde::Serialize;
 use serde_json::Value;
 
 /// Where an item came from: enough to find it again and to notice it changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Provenance {
     pub source: &'static str,
     pub id: String,
@@ -35,6 +36,21 @@ pub enum SourceError {
     GraphQl(String),
     #[error("unexpected response: {0}")]
     Shape(String),
+}
+
+impl SourceError {
+    /// The token was refused, so the UI must offer to reconnect rather than just report a failure.
+    #[must_use]
+    pub fn needs_reconnect(&self) -> bool {
+        matches!(
+            self,
+            Self::MissingToken(_)
+                | Self::Status {
+                    status: 401 | 403,
+                    ..
+                }
+        )
+    }
 }
 
 /// Turns a non-success response into [`SourceError::Status`], keeping the body the service explains
