@@ -110,9 +110,9 @@ async fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         ProjectRead::Inaccessible => {
             eprintln!(
-                "{owner}/{number} exists but this token may not read it. A classic token needs \
-                 read:project; a fine-grained one needs {owner} as its resource owner and the \
-                 Projects permission."
+                "{owner}/{number} exists but this token may not read it. A classic or OAuth token \
+                 needs read:project. A fine-grained one must be owned by the organization, with the \
+                 organization permission Projects; it cannot read a project owned by a user."
             );
             Ok(ExitCode::from(3))
         }
