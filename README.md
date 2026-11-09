@@ -9,10 +9,10 @@ project rather than by service. Local-first, with no server. See [docs/spec.md](
 | Part | State |
 | --- | --- |
 | Core, CLI, daemon, GNOME window, MCP server | Work; tested against made-up services, and GitHub pull requests against the real API |
+| Connecting from the window, merge, quick add, search | Work against made-up services and a real GNOME keyring; never run against the real services |
 | Roadmap and Todoist | Written from the API documentation; not yet run against the real services |
 | GNOME Shell extension | Written and unit tested, not yet run in a Shell |
-| First-run wizard, OAuth, quick add in the window, detail panel, search | Not done |
-| Merge and re-run from the app, "Confier à Claude" | Not done |
+| Detail panel, re-run of CI and roadmap edits from the app, "Confier à Claude" | Not done |
 | Windows, Android, Flatpak, `.deb` | Not done |
 
 ## Install
@@ -27,19 +27,20 @@ gnome-extensions enable pigeonnier@baxyz.github.io   # after logging out and bac
 
 ## Connect
 
-- **GitHub:** `gh auth login` with `read:project` and `read:org`, plus `repo` for private
-  repositories. A fine-grained token cannot read the projects of several owners.
-- **Todoist:** `pigeonnier login` reads an API token on standard input and saves it in the system
-  keyring. `TODOIST_TOKEN` takes precedence.
+Open the window: it offers **Connecter** for each service, and then creates your projects.
+
+- **Todoist:** your browser opens, you authorize, and that is all.
+- **GitHub:** if GitHub CLI is signed in, nothing to do. Otherwise your browser opens and you enter the
+  code the window shows, once an OAuth App is declared for your build with
+  `PIGEONNIER_GITHUB_CLIENT_ID` at compile time.
+
+Tokens stay in the system keyring. `pigeonnier connect github`, `pigeonnier connect todoist` and
+`pigeonnier disconnect` do the same from a terminal.
 
 ## Configure
 
-```bash
-pigeonnier init --todoist-parent Dev           # prints a proposal
-pigeonnier init --todoist-parent Dev --write   # saves it to ~/.config/pigeonnier/projects.toml
-```
-
-The daemon reloads the file when it changes. Add your own lists in
+The window writes `~/.config/pigeonnier/projects.toml`, and the daemon reloads it when it changes.
+`pigeonnier init --todoist-parent Dev` prints the same proposal. Add your own lists in
 `~/.config/pigeonnier/views.json`; a view is data, in the shape of
 [the default views](crates/pigeonnier-core/views/default.json).
 
@@ -51,12 +52,14 @@ pigeonnier list --view action        # action, today, or one of yours
 pigeonnier list --ids                # with the ids the next commands take
 pigeonnier done td:123               # mark a Todoist task done
 pigeonnier snooze gh-pr:a/b#1 2h     # 2h, tomorrow, monday, 2026-12-01
+pigeonnier quick "relire la doc vendredi p2" --project myproject
+pigeonnier merge gh-pr:a/b#1         # asks first; --yes skips the question
 pigeonnier add myproject "Rotate the key" --due friday --priority p2
 pigeonnier-gnome                     # the window; --sidebar for the narrow layout
 ```
 
-In the window: `j`/`k` move, `x` completes, `s` reports to tomorrow, `r` refreshes, `1` to `9` go to a
-project. Super+S shows or hides the sidebar when the extension is on.
+In the window: `j`/`k` move, `x` completes, `s` reports to tomorrow, `r` refreshes, `a` adds a task,
+`/` searches, `1` to `9` go to a project. Super+S shows or hides the sidebar when the extension is on.
 
 ### For Claude
 

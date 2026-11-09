@@ -215,11 +215,11 @@ Le premier lancement est un assistant de 3 écrans : **connecter GitHub, connect
 
 ### GitHub : device flow
 
-1. L'app affiche un code à 8 caractères et un bouton « Ouvrir github.com/login/device ».
+1. L'app affiche un code à 8 caractères, déjà copié, et un bouton « Ouvrir GitHub ».
 2. Tu colles le code dans le navigateur et tu autorises.
 3. L'app sonde le endpoint de token jusqu'à l'autorisation, puis passe à l'écran suivant.
 
-Aucun serveur de callback, aucun port local, ça marche aussi sur Android et derrière un SSH. Il faut une **OAuth App** déclarée sur ton compte, device flow activé.
+Aucun serveur de callback, aucun port local, ça marche aussi sur Android et derrière un SSH. Il faut une **OAuth App** déclarée sur ton compte, device flow activé ; son client ID, public par nature, se donne à la compilation (`PIGEONNIER_GITHUB_CLIENT_ID`).
 
 - **Scopes** : `repo` (PR des repos privés), `read:org` (liste des orgs), `read:project` (Projects v2).
 - **Raccourci** : si `gh` est installé et connecté, proposer « Utiliser le compte de GitHub CLI » (lecture de `gh auth token`). Zéro clic sur ligno et fajro.
@@ -233,10 +233,11 @@ Aucun serveur de callback, aucun port local, ça marche aussi sur Android et der
 2. Après accord, Todoist redirige vers `http://127.0.0.1:<port fixe>/callback`, où l'app écoute brièvement.
 3. L'app échange le code contre un token.
 
-- **Par défaut pour l'instant** : le token API personnel (Réglages Todoist → Intégrations → Développeur), avec `pigeonnier login`. C'est le plus simple pour un usage strictement personnel, et il n'y a rien à rafraîchir.
-- **Plus tard** : Todoist accepte PKCE (S256) sans secret pour un client public, déclaré par enregistrement dynamique ou par un document de métadonnées hébergé en HTTPS. La doc exige des redirections HTTPS et n'autorise `localhost` que « pour les tests » : à essayer avec un vrai client avant de s'y fier.
-- **Durée des tokens OAuth** : 1 h pour les nouvelles apps, avec des refresh tokens à usage unique. Réutiliser un refresh token consommé plus de 60 s après révoque tous les tokens de l'app : un seul processus doit rafraîchir, et chaque appareil a sa propre autorisation.
-- **Android** : token collé, `pigeonnier://callback` étant probablement refusé.
+- **Mise en œuvre** : Todoist accepte un client public avec PKCE (S256), sans secret. Chaque installation s'enregistre elle-même (`/oauth/register`), avec la redirection `http://localhost:8745/callback` ; il n'y a donc rien à déclarer ni à cacher.
+- **Point à confirmer** : la doc exige des redirections HTTPS et n'autorise `localhost` que « pour les tests ». Si Todoist le refuse, il faudra une redirection HTTPS hébergée.
+- **Durée des tokens** : 1 h, avec des refresh tokens à usage unique. Réutiliser un refresh token consommé plus de 60 s après révoque tous les tokens de l'app : un verrou de fichier garantit qu'un seul processus rafraîchit, et la session est relue dans le trousseau juste avant.
+- **Plan B** : `pigeonnier login` lit un token API personnel sur l'entrée standard.
+- **Android** : à voir, `pigeonnier://callback` étant probablement refusé.
 
 ### Stockage des secrets
 
@@ -386,10 +387,17 @@ interface io.github.baxyz.Pigeonnier1
   method  GetView(s view) -> s               # idem pour une vue : all, action, today…
   method  Refresh()
   method  Complete(s item_id)                # Todoist seulement
+  method  Merge(s item_id)                   # mes PR prêtes
+  method  AddTask(s project, s text)         # langage naturel
+  method  Setup(s todoist_parent)            # premier lancement
+  method  ConnectGithub() -> (s code, s url)
+  method  ConnectTodoist() -> s url
+  method  Disconnect(s service)
   method  Snooze(s item_id, x until_unix)
   method  ShowWindow(s mode)                 # "sidebar" | "full"
   signal  Changed(u revision)
   signal  WindowRequested(s mode)
+  signal  ConnectionFailed(s service, s message)
   property Counts  a{s(uu)}                  # projet -> (action requise, en retard)
   property Revision u
 ```
