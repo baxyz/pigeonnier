@@ -5,7 +5,7 @@
 
 mod client;
 
-use futures_util::StreamExt as _;
+use futures_util::{StreamExt as _, stream};
 use pigeonnier_core::viewmodel::{ItemVm, ProjectVm, Snapshot};
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, RelmApp, SimpleComponent, adw, gtk};
@@ -29,6 +29,19 @@ enum Msg {
     Mode(String),
     Key(char),
     Compact(bool),
+    AskMerge(String, String),
+    Merge(String),
+    QuickAdd(String),
+    Search(String),
+    Failed(String),
+    ShowConnections,
+    HideConnections,
+    ConnectGithub,
+    ConnectTodoist,
+    GithubCode(String, String),
+    OpenPage(String),
+    Disconnect(&'static str),
+    FinishSetup(String),
 }
 
 struct App {
@@ -39,6 +52,11 @@ struct App {
     views_bar: gtk::CenterBox,
     views: gtk::Box,
     compact: bool,
+    search_bar: gtk::SearchBar,
+    search_entry: gtk::SearchEntry,
+    search: String,
+    quick: gtk::Entry,
+    connections_open: bool,
     projects: gtk::ListBox,
     list: gtk::Box,
     view: String,
@@ -154,6 +172,14 @@ impl App {
                 row.add_suffix(&button);
             }
         }
+        if item.actions.iter().any(|action| action == "merge") {
+            let button = gtk::Button::with_label("Merger");
+            button.add_css_class("flat");
+            button.set_valign(gtk::Align::Center);
+            let (sender, id, title) = (self.sender.clone(), item.id.clone(), item.title.clone());
+            button.connect_clicked(move |_| sender.input(Msg::AskMerge(id.clone(), title.clone())));
+            row.add_suffix(&button);
+        }
         if item.actions.iter().any(|action| action == "complete") {
             let button = icon_button("object-select-symbolic", "Marquer comme fait");
             let (sender, id) = (self.sender.clone(), item.id.clone());
@@ -207,9 +233,36 @@ impl App {
         }
         self.rows.clear();
         self.focused = None;
-        let Some(snapshot) = self.snapshot.clone() else {
+        let Some(mut snapshot) = self.snapshot.clone() else {
             return;
         };
+        if snapshot.needs_setup || self.connections_open {
+            self.draw_connections(&snapshot);
+            return;
+        }
+        let query = self.search.to_lowercase();
+        if !query.is_empty() {
+            let matches = |item: &ItemVm| {
+                item.title.to_lowercase().contains(&query)
+                    || item.context.to_lowercase().contains(&query)
+            };
+            for project in &mut snapshot.projects {
+                project.items.retain(|item| matches(item));
+                if let Some(bots) = &mut project.bots {
+                    bots.items.retain(|item| matches(item));
+                }
+                if project
+                    .bots
+                    .as_ref()
+                    .is_some_and(|bots| bots.items.is_empty())
+                {
+                    project.bots = None;
+                }
+            }
+            snapshot
+                .projects
+                .retain(|project| !project.items.is_empty() || project.bots.is_some());
+        }
         let shown: Vec<&ProjectVm> = snapshot
             .projects
             .iter()
@@ -227,6 +280,84 @@ impl App {
             let group = self.project_group(project);
             self.list.append(&group);
         }
+    }
+
+    /// The first thing a new user sees, and where services are connected and disconnected later.
+    fn draw_connections(&self, snapshot: &Snapshot) {
+        let services = adw::PreferencesGroup::new();
+        services.set_title("Connexions");
+        services.set_description(Some(
+            "Pigeonnier lit tes PR et tes tâches. Les jetons restent dans le trousseau de ce poste.",
+        ));
+        let add = |name: &str, connected: bool, connect: fn() -> Msg, service: &'static str| {
+            let row = adw::ActionRow::new();
+            row.set_title(name);
+            row.set_subtitle(if connected {
+                "Connecté"
+            } else {
+                "Non connecté"
+            });
+            let button = gtk::Button::with_label(if connected {
+                "Déconnecter"
+            } else {
+                "Connecter"
+            });
+            button.set_valign(gtk::Align::Center);
+            if !connected {
+                button.add_css_class("suggested-action");
+            }
+            let sender = self.sender.clone();
+            button.connect_clicked(move |_| {
+                if connected {
+                    sender.input(Msg::Disconnect(service));
+                } else {
+                    sender.input(connect());
+                }
+            });
+            row.add_suffix(&button);
+            services.add(&row);
+        };
+        add(
+            "GitHub",
+            snapshot.github_connected,
+            || Msg::ConnectGithub,
+            "github",
+        );
+        add(
+            "Todoist",
+            snapshot.todoist_connected,
+            || Msg::ConnectTodoist,
+            "todoist",
+        );
+        self.list.append(&services);
+
+        let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        footer.set_halign(gtk::Align::End);
+        if snapshot.needs_setup {
+            let projects = adw::PreferencesGroup::new();
+            projects.set_title("Projets");
+            projects.set_description(Some(
+                "Une org GitHub, son Project et une section Todoist forment un projet. Indique le projet Todoist qui contient une section par projet, ou laisse vide.",
+            ));
+            let parent = adw::EntryRow::new();
+            parent.set_title("Projet Todoist parent");
+            projects.add(&parent);
+            self.list.append(&projects);
+            let finish = gtk::Button::with_label("Créer mes projets");
+            finish.add_css_class("suggested-action");
+            finish.set_sensitive(snapshot.github_connected);
+            let sender = self.sender.clone();
+            finish.connect_clicked(move |_| {
+                sender.input(Msg::FinishSetup(parent.text().to_string()));
+            });
+            footer.append(&finish);
+        } else {
+            let close = gtk::Button::with_label("Fermer");
+            let sender = self.sender.clone();
+            close.connect_clicked(move |_| sender.input(Msg::HideConnections));
+            footer.append(&close);
+        }
+        self.list.append(&footer);
     }
 
     fn draw_projects(&self) {
@@ -320,8 +451,18 @@ impl App {
                 "Le démon ne répond pas : lance pigeonnierd".to_owned()
             },
         );
+        // The connections page already says the same thing.
+        let on_connections = self.connections_open
+            || self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.needs_setup);
         self.banner.set_title(&escape(&text));
-        self.banner.set_revealed(!text.is_empty());
+        self.banner
+            .set_revealed(!text.is_empty() && (error.is_some() || !on_connections));
+        let reconnect = error.is_none() && issues.iter().any(|issue| issue.reconnect);
+        self.banner
+            .set_button_label(reconnect.then_some("Connecter"));
     }
 
     /// In the narrow layout the filters no longer fit in the header, so they get a bar of their own.
@@ -356,6 +497,13 @@ impl App {
             'j' => self.focus_row(current.map_or(0, |index| index + 1)),
             'k' => self.focus_row(current.map_or(0, |index| index.saturating_sub(1))),
             'r' => self.sender.input(Msg::Refresh),
+            'a' => {
+                self.quick.grab_focus();
+            }
+            '/' => {
+                self.search_bar.set_search_mode(true);
+                self.search_entry.grab_focus();
+            }
             'x' => {
                 if let Some(item) = item
                     && item.actions.iter().any(|action| action == "complete")
@@ -402,27 +550,43 @@ fn spawn_load(sender: &ComponentSender<App>, view: String) {
     });
 }
 
+/// Runs an action of the daemon and reports its failure to the window.
+fn run<F>(sender: &ComponentSender<App>, action: F)
+where
+    F: Future<Output = zbus::Result<()>> + Send + 'static,
+{
+    let sender = sender.clone();
+    relm4::spawn(async move {
+        let result = action.await.map_err(|error| client::message(&error));
+        sender.input(Msg::ActionDone(result));
+    });
+}
+
 /// Follows the daemon: its changes, its requests for the window, and its coming back after a stop.
 fn follow_daemon(sender: ComponentSender<App>) {
     relm4::spawn(async move {
         loop {
             if let Ok(daemon) = client::connect().await
-                && let (Ok(mut changed), Ok(mut requested)) = (
+                && let (Ok(changed), Ok(requested), Ok(failed)) = (
                     daemon.receive_changed().await,
                     daemon.receive_window_requested().await,
+                    daemon.receive_connection_failed().await,
                 )
             {
                 sender.input(Msg::Load);
-                loop {
-                    let next = futures_util::future::select(changed.next(), requested.next());
-                    match next.await {
-                        futures_util::future::Either::Left((Some(_), _)) => sender.input(Msg::Load),
-                        futures_util::future::Either::Right((Some(signal), _)) => {
-                            if let Ok(arguments) = signal.args() {
-                                sender.input(Msg::Mode(arguments.mode.clone()));
-                            }
-                        }
-                        _ => break,
+                let changed = changed.map(|_| Some(Msg::Load));
+                let requested = requested
+                    .map(|signal| signal.args().ok().map(|args| Msg::Mode(args.mode.clone())));
+                let failed = failed.map(|signal| {
+                    signal
+                        .args()
+                        .ok()
+                        .map(|args| Msg::Failed(args.message.clone()))
+                });
+                let mut events = stream::select(changed, stream::select(requested, failed));
+                while let Some(event) = events.next().await {
+                    if let Some(message) = event {
+                        sender.input(message);
                     }
                 }
             }
@@ -444,6 +608,7 @@ impl SimpleComponent for App {
         window
     }
 
+    #[allow(clippy::too_many_lines)] // Building the window is long but flat.
     fn init(
         mode: String,
         window: Self::Root,
@@ -475,8 +640,39 @@ impl SimpleComponent for App {
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&views));
         header.pack_end(&refresh);
+        let connections = icon_button("system-users-symbolic", "Connexions");
+        let connections_sender = sender.clone();
+        connections.connect_clicked(move |_| connections_sender.input(Msg::ShowConnections));
+        header.pack_end(&connections);
 
         let banner = adw::Banner::new("");
+        let banner_sender = sender.clone();
+        banner.connect_button_clicked(move |_| banner_sender.input(Msg::ShowConnections));
+
+        let search_entry = gtk::SearchEntry::new();
+        search_entry.set_hexpand(true);
+        let search_bar = gtk::SearchBar::new();
+        search_bar.set_child(Some(&search_entry));
+        search_bar.connect_entry(&search_entry);
+        let search_sender = sender.clone();
+        search_entry.connect_search_changed(move |entry| {
+            search_sender.input(Msg::Search(entry.text().to_string()));
+        });
+
+        let quick = gtk::Entry::new();
+        quick.set_placeholder_text(Some("Ajouter une tâche : relire la doc vendredi p2"));
+        quick.set_margin_top(6);
+        quick.set_margin_bottom(6);
+        quick.set_margin_start(12);
+        quick.set_margin_end(12);
+        let quick_sender = sender.clone();
+        quick.connect_activate(move |entry| {
+            let text = entry.text().trim().to_owned();
+            if !text.is_empty() {
+                quick_sender.input(Msg::QuickAdd(text));
+                entry.set_text("");
+            }
+        });
         let list = gtk::Box::new(gtk::Orientation::Vertical, 18);
         list.set_margin_top(12);
         list.set_margin_bottom(18);
@@ -491,6 +687,7 @@ impl SimpleComponent for App {
         scroll.set_child(Some(&clamp));
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
         body.append(&banner);
+        body.append(&search_bar);
         body.append(&scroll);
         let views_bar = gtk::CenterBox::new();
         views_bar.set_margin_bottom(6);
@@ -499,6 +696,7 @@ impl SimpleComponent for App {
         content_view.add_top_bar(&header);
         content_view.add_top_bar(&views_bar);
         content_view.set_content(Some(&body));
+        content_view.add_bottom_bar(&quick);
         let content_page = adw::NavigationPage::new(&content_view, "Pigeonnier");
 
         let split = adw::NavigationSplitView::new();
@@ -538,6 +736,11 @@ impl SimpleComponent for App {
             views_bar,
             views,
             compact: false,
+            search_bar,
+            search_entry,
+            search: String::new(),
+            quick,
+            connections_open: false,
             projects,
             list,
             view: "all".to_owned(),
@@ -553,6 +756,7 @@ impl SimpleComponent for App {
         ComponentParts { model, widgets: () }
     }
 
+    #[allow(clippy::too_many_lines)] // One short arm per message.
     fn update(&mut self, message: Msg, sender: ComponentSender<Self>) {
         match message {
             Msg::Load => spawn_load(&sender, self.view.clone()),
@@ -598,24 +802,89 @@ impl SimpleComponent for App {
                     },
                 );
             }
-            Msg::Complete(id) => {
+            Msg::Complete(id) => run(&sender, async move { client::complete(&id).await }),
+            Msg::Snooze(id, until) => run(&sender, async move { client::snooze(&id, until).await }),
+            Msg::Merge(id) => run(&sender, async move { client::merge(&id).await }),
+            Msg::AskMerge(id, title) => {
+                let dialog =
+                    adw::AlertDialog::new(Some("Merger cette PR ?"), Some(&escape(&title)));
+                dialog.add_response("cancel", "Annuler");
+                dialog.add_response("merge", "Merger");
+                dialog.set_response_appearance("merge", adw::ResponseAppearance::Suggested);
+                dialog.set_close_response("cancel");
+                let confirm = sender.clone();
+                dialog.connect_response(Some("merge"), move |_, _| {
+                    confirm.input(Msg::Merge(id.clone()));
+                });
+                dialog.present(Some(&self.window));
+            }
+            Msg::QuickAdd(text) => {
+                let project = self.project.clone().unwrap_or_default();
+                run(
+                    &sender,
+                    async move { client::add_task(&project, &text).await },
+                );
+            }
+            Msg::Search(query) => {
+                self.search = query;
+                self.draw_list();
+            }
+            Msg::Failed(message) => {
+                self.banner.set_title(&escape(&message));
+                self.banner.set_button_label(None);
+                self.banner.set_revealed(true);
+            }
+            Msg::ShowConnections => {
+                self.connections_open = true;
+                self.split.set_show_content(true);
+                self.draw_list();
+                self.draw_banner(None);
+            }
+            Msg::HideConnections => {
+                self.connections_open = false;
+                self.draw_list();
+                self.draw_banner(None);
+            }
+            Msg::ConnectGithub => {
                 let sender = sender.clone();
                 relm4::spawn(async move {
-                    let result = client::complete(&id)
-                        .await
-                        .map_err(|error| error.to_string());
-                    sender.input(Msg::ActionDone(result));
+                    sender.input(match client::connect_github().await {
+                        Ok((code, url)) => Msg::GithubCode(code, url),
+                        Err(error) => Msg::Failed(client::message(&error)),
+                    });
                 });
             }
-            Msg::Snooze(id, until) => {
+            Msg::ConnectTodoist => {
                 let sender = sender.clone();
                 relm4::spawn(async move {
-                    let result = client::snooze(&id, until)
-                        .await
-                        .map_err(|error| error.to_string());
-                    sender.input(Msg::ActionDone(result));
+                    sender.input(match client::connect_todoist().await {
+                        Ok(url) => Msg::OpenPage(url),
+                        Err(error) => Msg::Failed(client::message(&error)),
+                    });
                 });
             }
+            Msg::GithubCode(code, url) => {
+                gtk::prelude::WidgetExt::display(&self.window)
+                    .clipboard()
+                    .set_text(&code);
+                let body =
+                    format!("Entre ce code sur la page GitHub, il est déjà copié :\n\n{code}");
+                let dialog = adw::AlertDialog::new(Some("Connecter GitHub"), Some(&body));
+                dialog.add_response("close", "Fermer");
+                dialog.add_response("open", "Ouvrir GitHub");
+                dialog.set_response_appearance("open", adw::ResponseAppearance::Suggested);
+                dialog.set_close_response("close");
+                let open = sender.clone();
+                dialog.connect_response(Some("open"), move |_, _| {
+                    open.input(Msg::OpenPage(url.clone()));
+                });
+                dialog.present(Some(&self.window));
+            }
+            Msg::OpenPage(url) => sender.input(Msg::Open(url)),
+            Msg::Disconnect(service) => {
+                run(&sender, async move { client::disconnect(service).await });
+            }
+            Msg::FinishSetup(parent) => run(&sender, async move { client::setup(&parent).await }),
             Msg::ActionDone(result) => {
                 if let Err(error) = result {
                     self.banner.set_title(&escape(&error));
