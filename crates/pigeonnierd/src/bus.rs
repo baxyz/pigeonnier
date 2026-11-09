@@ -9,9 +9,9 @@ use std::sync::atomic::Ordering;
 use chrono::DateTime;
 use pigeonnier_core::engine::EngineError;
 use zbus::object_server::SignalEmitter;
-use zbus::{connection, fdo, interface};
+use zbus::{fdo, interface};
 
-use crate::{Shared, now};
+use crate::{Shared, connection, now};
 
 pub const BUS_NAME: &str = "io.github.baxyz.Pigeonnier";
 pub const OBJECT_PATH: &str = "/io/github/baxyz/Pigeonnier";
@@ -76,6 +76,79 @@ impl Service {
             .await
     }
 
+    /// Merges a PR of mine that is ready.
+    async fn merge(&self, item_id: &str) -> fdo::Result<()> {
+        let shared = Arc::clone(&self.shared);
+        let item_id = item_id.to_owned();
+        self.on_tokio(async move { shared.engine.read().await.merge(&item_id, now()).await })
+            .await
+    }
+
+    /// Adds a task in natural language. An empty project means the Todoist inbox.
+    async fn add_task(&self, project: &str, text: &str) -> fdo::Result<()> {
+        let shared = Arc::clone(&self.shared);
+        let project = Some(project.to_owned()).filter(|project| !project.is_empty());
+        let text = text.to_owned();
+        self.on_tokio(async move {
+            let engine = shared.engine.read().await;
+            engine.quick_add(project.as_deref(), &text).await
+        })
+        .await
+    }
+
+    /// First run: writes the proposed configuration.
+    async fn setup(&self, todoist_parent: &str) -> fdo::Result<()> {
+        let shared = Arc::clone(&self.shared);
+        let parent = Some(todoist_parent.trim().to_owned()).filter(|parent| !parent.is_empty());
+        self.on_tokio(async move { crate::first_run(&shared, parent).await })
+            .await
+    }
+
+    /// Starts connecting GitHub: returns the code to enter and the page to enter it on, and goes on
+    /// waiting for the person in the background.
+    async fn connect_github(
+        &self,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<(String, String)> {
+        let task = connection::github(Arc::clone(&self.shared), connection.clone());
+        self.shared
+            .runtime
+            .spawn(task)
+            .await
+            .map_err(failed)?
+            .map_err(failed)
+    }
+
+    /// Starts connecting Todoist: returns the page to open, and waits for the browser to come back.
+    async fn connect_todoist(
+        &self,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> fdo::Result<String> {
+        let task = connection::todoist(Arc::clone(&self.shared), connection.clone());
+        self.shared
+            .runtime
+            .spawn(task)
+            .await
+            .map_err(failed)?
+            .map_err(failed)
+    }
+
+    /// Removes the tokens of `github` or `todoist` and forgets its cache.
+    async fn disconnect(&self, service: &str) -> fdo::Result<()> {
+        connection::disconnect(&self.shared, service)
+            .await
+            .map_err(failed)?;
+        self.shared.refresh.notify_one();
+        Ok(())
+    }
+
+    /// A connection started earlier ended badly.
+    #[zbus(signal)]
+    pub async fn connection_failed(
+        emitter: &SignalEmitter<'_>,
+        service: &str,
+        message: &str,
+    ) -> zbus::Result<()>;
     /// Asks for the window, `sidebar` or `full`. The Shell extension places it.
     async fn show_window(
         &self,
@@ -122,7 +195,7 @@ pub fn spawn_app(mode: &str) {
 }
 
 pub async fn serve(shared: Arc<Shared>) -> zbus::Result<zbus::Connection> {
-    connection::Builder::session()
+    zbus::connection::Builder::session()
         .name(BUS_NAME)
         .serve_at(OBJECT_PATH, Service { shared })
         .build()

@@ -2,7 +2,7 @@
 
 mod mcp;
 
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::{DateTime, FixedOffset, Local};
@@ -13,6 +13,8 @@ use pigeonnier_core::credentials;
 use pigeonnier_core::discover;
 use pigeonnier_core::engine::{Engine, NewAction, connect};
 use pigeonnier_core::item::Priority;
+use pigeonnier_core::oauth::{CALLBACK_PORT, github_device_flow, start_todoist_login};
+
 use pigeonnier_core::paths;
 use pigeonnier_core::source::github::GithubClient;
 use pigeonnier_core::source::todoist::{FULL_SYNC, TodoistClient};
@@ -48,6 +50,20 @@ enum Command {
     Done { id: String },
     /// Report an item: 2h, tomorrow, monday, 2026-12-01
     Snooze { id: String, until: String },
+    /// Merge a pull request of yours that is ready, with the repository's default method
+    Merge {
+        id: String,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Add a task in natural language, such as "relire la doc vendredi p2"
+    Quick {
+        text: String,
+        /// The project whose Todoist section gets it; otherwise, the Todoist inbox
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// Create a manual action in a project's Todoist section
     Add {
         project: String,
@@ -69,14 +85,28 @@ enum Command {
         #[arg(long)]
         write: bool,
     },
-    /// Save a Todoist API token, read from standard input, in the system keyring
+    /// Connect a service in your browser
+    Connect {
+        #[arg(value_enum)]
+        service: Service,
+    },
+    /// Disconnect a service and forget its cache
+    Disconnect {
+        #[arg(value_enum)]
+        service: Service,
+    },
+    /// Save a Todoist API token, read from standard input, instead of connecting
     Login,
-    /// Remove the Todoist token from the keyring and forget its cache
-    Logout,
     /// List the available views
     Views,
     /// Serve `list_items` and `add_manual_action` to an agent, over MCP on standard input and output
     Mcp,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Service {
+    Github,
+    Todoist,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -106,6 +136,53 @@ fn engine() -> Result<Engine> {
     let config = Config::load(&paths::config_file())?;
     let cache = Cache::open(&paths::cache_file())?;
     Ok(connect(config, cache))
+}
+
+fn open_browser(url: &str) {
+    if std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .is_err()
+    {
+        println!("Ouvre cette page : {url}");
+    }
+}
+
+async fn connect_service(service: Service) -> Result<()> {
+    match service {
+        Service::Github => {
+            let flow = github_device_flow().context(
+                "this build has no GitHub application declared: use `gh auth login` instead",
+            )?;
+            let code = flow.start().await?;
+            println!(
+                "Entre ce code dans la page qui s'ouvre : {}",
+                code.user_code
+            );
+            open_browser(&code.verification_uri);
+            let token = flow.wait_for_token(&code).await?;
+            credentials::store(credentials::GITHUB, &token)?;
+        }
+        Service::Todoist => {
+            let metadata = std::env::var("PIGEONNIER_TODOIST_METADATA").ok();
+            let login = start_todoist_login(metadata.as_deref(), CALLBACK_PORT).await?;
+            open_browser(&login.url);
+            credentials::store_todoist_session(&login.finish().await?)?;
+        }
+    }
+    println!("connecté");
+    Ok(())
+}
+
+fn confirm(question: &str) -> Result<bool> {
+    print!("{question}");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_lowercase().as_str(),
+        "o" | "oui" | "y" | "yes"
+    ))
 }
 
 fn print_item(item: &ItemVm, ids: bool) {
@@ -162,7 +239,8 @@ async fn init(todoist_parent: Option<String>, write: bool) -> Result<()> {
     let sections = match (credentials::todoist_token(), &todoist_parent) {
         (Some(token), Some(parent)) => {
             let response = TodoistClient::new(token).sync(FULL_SYNC).await?;
-            todoist_sections(&response.projects, &response.sections, parent)?
+            discover::sections_of(&response.projects, &response.sections, parent)
+                .ok_or_else(|| anyhow!("no Todoist project named {parent}"))?
         }
         (None, Some(_)) => bail!("no Todoist token: run `pigeonnier login`"),
         (_, None) => Vec::new(),
@@ -184,28 +262,6 @@ async fn init(todoist_parent: Option<String>, write: bool) -> Result<()> {
         eprintln!("add --write to save it");
     }
     Ok(())
-}
-
-fn todoist_sections(
-    projects: &[serde_json::Value],
-    sections: &[serde_json::Value],
-    parent: &str,
-) -> Result<Vec<String>> {
-    let wanted = pigeonnier_core::config::normalize_name(parent);
-    let parent_id = projects
-        .iter()
-        .find(|project| {
-            project["name"]
-                .as_str()
-                .is_some_and(|name| pigeonnier_core::config::normalize_name(name) == wanted)
-        })
-        .and_then(|project| project["id"].as_str())
-        .ok_or_else(|| anyhow!("no Todoist project named {parent}"))?;
-    Ok(sections
-        .iter()
-        .filter(|section| section["project_id"].as_str() == Some(parent_id))
-        .filter_map(|section| section["name"].as_str().map(str::to_owned))
-        .collect())
 }
 
 #[tokio::main]
@@ -236,6 +292,18 @@ async fn main() -> Result<()> {
             let at = parse_until(&until, now()).ok_or_else(|| anyhow!("cannot read {until}"))?;
             engine()?.snooze(&id, at).await?;
             println!("{id} : reporté au {}", at.format("%Y-%m-%d %H:%M"));
+        }
+        Command::Merge { id, yes } => {
+            if !yes && !confirm(&format!("Merger {id} ? [o/N] "))? {
+                println!("annulé");
+                return Ok(());
+            }
+            engine()?.merge(&id, now()).await?;
+            println!("{id} : mergée");
+        }
+        Command::Quick { text, project } => {
+            engine()?.quick_add(project.as_deref(), &text).await?;
+            println!("ajouté");
         }
         Command::Add {
             project,
@@ -269,10 +337,19 @@ async fn main() -> Result<()> {
             credentials::store(credentials::TODOIST, token)?;
             println!("token saved in the system keyring");
         }
-        Command::Logout => {
-            credentials::forget(credentials::TODOIST)?;
-            engine()?.purge_service("todoist.")?;
-            println!("disconnected from Todoist");
+        Command::Connect { service } => connect_service(service).await?,
+        Command::Disconnect { service } => {
+            match service {
+                Service::Github => {
+                    credentials::forget(credentials::GITHUB)?;
+                    engine()?.purge_service("github.")?;
+                }
+                Service::Todoist => {
+                    credentials::forget_todoist()?;
+                    engine()?.purge_service("todoist.")?;
+                }
+            }
+            println!("déconnecté");
         }
         Command::Mcp => mcp::serve(engine()?).await?,
         Command::Views => {

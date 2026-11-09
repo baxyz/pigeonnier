@@ -3,6 +3,8 @@
 //! The first run: one owner, one project and one section make a Pigeonnier project, and the
 //! convention lets it be proposed without asking anything.
 
+use serde_json::Value;
+
 use crate::config::{
     Config, Defaults, GithubLink, Notifications, Project, TodoistLink, normalize_name,
 };
@@ -76,6 +78,27 @@ pub fn propose(owners: &[Owner], sections: &[String], parent: Option<&str>) -> C
         notifications: Notifications::default(),
         projects,
     }
+}
+
+/// The names of the sections of a Todoist project, as a sync lists them.
+#[must_use]
+pub fn sections_of(projects: &[Value], sections: &[Value], parent: &str) -> Option<Vec<String>> {
+    let wanted = normalize_name(parent);
+    let parent_id = projects
+        .iter()
+        .find(|project| {
+            project["name"]
+                .as_str()
+                .is_some_and(|name| normalize_name(name) == wanted)
+        })
+        .and_then(|project| project["id"].as_str())?;
+    Some(
+        sections
+            .iter()
+            .filter(|section| section["project_id"].as_str() == Some(parent_id))
+            .filter_map(|section| section["name"].as_str().map(str::to_owned))
+            .collect(),
+    )
 }
 
 fn color(index: usize) -> String {

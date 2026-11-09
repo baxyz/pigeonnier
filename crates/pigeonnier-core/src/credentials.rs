@@ -3,11 +3,16 @@
 //! Where tokens come from: the environment, GitHub CLI, then the system keyring. They are never
 //! written to the configuration or the cache.
 
+use chrono::Utc;
+
+use crate::oauth::{OauthError, TodoistSession};
+use crate::paths;
 use crate::source::github::GithubClient;
 
 const SERVICE: &str = "pigeonnier";
 pub const GITHUB: &str = "github";
 pub const TODOIST: &str = "todoist";
+const TODOIST_SESSION: &str = "todoist-session";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialError {
@@ -81,14 +86,73 @@ fn from_environment(variable: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// A connection made in the application comes first; GitHub CLI spares a connection otherwise.
 #[must_use]
 pub fn github_token() -> Option<String> {
-    GithubClient::token_from_gh_cli()
-        .ok()
-        .or_else(|| from_keyring(GITHUB))
+    from_keyring(GITHUB).or_else(|| GithubClient::token_from_gh_cli().ok())
 }
 
+/// A token set by hand, in the environment or with `pigeonnier login`.
 #[must_use]
 pub fn todoist_token() -> Option<String> {
     from_environment("TODOIST_TOKEN").or_else(|| from_keyring(TODOIST))
+}
+
+#[must_use]
+pub fn todoist_session() -> Option<TodoistSession> {
+    serde_json::from_str(&from_keyring(TODOIST_SESSION)?).ok()
+}
+
+/// # Errors
+/// The keyring is missing or refuses.
+pub fn store_todoist_session(session: &TodoistSession) -> Result<(), CredentialError> {
+    let text = serde_json::to_string(session)
+        .map_err(|error| CredentialError::Keyring(error.to_string()))?;
+    store(TODOIST_SESSION, &text)
+}
+
+/// Removes everything that connects Todoist.
+///
+/// # Errors
+/// The keyring is missing or refuses.
+pub fn forget_todoist() -> Result<(), CredentialError> {
+    forget(TODOIST)?;
+    forget(TODOIST_SESSION)
+}
+
+/// The token to use now, refreshed if it is about to end. Refresh tokens work once and reusing one
+/// revokes every token of the application, while the daemon and the CLI share this session: a file
+/// lock makes one of them refresh, and the other read what it stored.
+///
+/// # Errors
+/// No session, or the refresh failing.
+pub async fn fresh_todoist_token(http: &reqwest::Client) -> Result<String, OauthError> {
+    let missing = || OauthError::Shape("no Todoist session".to_owned());
+    let session = todoist_session().ok_or_else(missing)?;
+    if !session.needs_refresh(Utc::now()) {
+        return Ok(session.access_token);
+    }
+    let path = paths::cache_file().with_file_name("todoist-refresh.lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock = std::fs::File::create(path)?;
+    while !lock_file(&lock)? {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let session = todoist_session().ok_or_else(missing)?;
+    if !session.needs_refresh(Utc::now()) {
+        return Ok(session.access_token);
+    }
+    let refreshed = session.refresh(http).await?;
+    store_todoist_session(&refreshed).map_err(|error| OauthError::Shape(error.to_string()))?;
+    Ok(refreshed.access_token)
+}
+
+fn lock_file(file: &std::fs::File) -> Result<bool, OauthError> {
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
 }

@@ -102,9 +102,15 @@ impl TodoistCommand {
     }
 }
 
+/// A token given by hand never changes; a connection made in the application renews itself.
+enum Auth {
+    Token(String),
+    Session,
+}
+
 pub struct TodoistClient {
     http: reqwest::Client,
-    token: String,
+    auth: Auth,
     base: String,
 }
 
@@ -118,22 +124,42 @@ impl TodoistClient {
     pub fn with_base(token: String, base: String) -> Self {
         Self {
             http: reqwest::Client::new(),
-            token,
+            auth: Auth::Token(token),
             base,
         }
     }
 
-    fn post(&self) -> reqwest::RequestBuilder {
-        self.http
-            .post(format!("{}/api/v1/sync", self.base))
-            .bearer_auth(&self.token)
+    /// Uses the session saved in the keyring.
+    #[must_use]
+    pub fn with_session(base: Option<String>) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            auth: Auth::Session,
+            base: base.unwrap_or_else(|| DEFAULT_BASE.to_owned()),
+        }
     }
 
+    async fn token(&self) -> Result<String, SourceError> {
+        match &self.auth {
+            Auth::Token(token) => Ok(token.clone()),
+            Auth::Session => crate::credentials::fresh_todoist_token(&self.http)
+                .await
+                .map_err(|error| SourceError::MissingToken(error.to_string())),
+        }
+    }
+
+    async fn post(&self) -> Result<reqwest::RequestBuilder, SourceError> {
+        Ok(self
+            .http
+            .post(format!("{}/api/v1/sync", self.base))
+            .bearer_auth(self.token().await?))
+    }
     /// # Errors
     /// Any HTTP failure, or a body that is not a sync response.
     pub async fn sync(&self, sync_token: &str) -> Result<SyncResponse, SourceError> {
         let response = self
             .post()
+            .await?
             .form(&[
                 ("sync_token", sync_token),
                 ("resource_types", RESOURCE_TYPES),
@@ -141,6 +167,22 @@ impl TodoistClient {
             .send()
             .await?;
         Ok(check_status(response).await?.json().await?)
+    }
+
+    /// Creates a task from natural language, parsed as in Todoist's own apps.
+    ///
+    /// # Errors
+    /// Any HTTP failure.
+    pub async fn quick_add(&self, text: &str) -> Result<(), SourceError> {
+        let response = self
+            .http
+            .post(format!("{}/api/v1/tasks/quick", self.base))
+            .bearer_auth(self.token().await?)
+            .json(&json!({ "text": text }))
+            .send()
+            .await?;
+        check_status(response).await?;
+        Ok(())
     }
 
     /// Sends one command. Todoist answers 200 even when a command fails, so `sync_status` decides.
@@ -151,7 +193,12 @@ impl TodoistClient {
         let body = command.to_json();
         let uuid = body["uuid"].as_str().unwrap_or_default().to_owned();
         let commands = Value::Array(vec![body]).to_string();
-        let response = self.post().form(&[("commands", commands)]).send().await?;
+        let response = self
+            .post()
+            .await?
+            .form(&[("commands", commands)])
+            .send()
+            .await?;
         let answer: Value = check_status(response).await?.json().await?;
         match answer.pointer(&format!("/sync_status/{uuid}")) {
             Some(Value::String(status)) if status == "ok" => Ok(()),

@@ -33,8 +33,9 @@ fn pr(number: u32, author: &str, kind: &str) -> Value {
         "id": format!("PR_{number}"), "number": number, "title": format!("PR {number}"),
         "url": format!("https://github.com/acme/tool/pull/{number}"), "isDraft": false,
         "updatedAt": "2026-11-08T10:00:00Z", "createdAt": "2026-11-08T10:00:00Z",
-        "reviewDecision": null, "mergeable": "MERGEABLE",
-        "repository": { "name": "tool", "nameWithOwner": "acme/tool", "owner": { "login": "acme" } },
+        "reviewDecision": null, "mergeable": "MERGEABLE", "headRefOid": "abc123",
+        "repository": { "name": "tool", "nameWithOwner": "acme/tool",
+                        "viewerDefaultMergeMethod": "SQUASH", "owner": { "login": "acme" } },
         "statusCheckRollup": { "state": "SUCCESS" }, "labels": { "nodes": [] }, "milestone": null,
         "author": { "login": author, "__typename": kind }, "timelineItems": { "nodes": [] },
     })
@@ -46,7 +47,7 @@ fn search(nodes: &[Value]) -> Value {
 
 async fn github() -> MockServer {
     let server = MockServer::start().await;
-    Mock::given(body_string_contains("viewer"))
+    Mock::given(body_string_contains("viewer { login }"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(json!({ "data": { "viewer": { "login": "me" } } })),
@@ -220,7 +221,7 @@ async fn a_project_the_token_may_not_read_says_so() {
         )
         .mount(&server)
         .await;
-    Mock::given(body_string_contains("viewer"))
+    Mock::given(body_string_contains("viewer { login }"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(json!({ "data": { "viewer": { "login": "me" } } })),
@@ -351,4 +352,105 @@ async fn the_first_notifications_are_recorded_and_new_ones_shown() {
 
     assert_eq!(engine.take_notifications(now()).unwrap(), []);
     assert_eq!(engine.take_notifications(now()).unwrap(), []);
+}
+
+#[tokio::test]
+async fn a_pr_ready_to_merge_merges_at_the_commit_that_was_checked() {
+    let github = github().await;
+    Mock::given(body_string_contains("mergePullRequest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({ "data": { "mergePullRequest": { "pullRequest": { "merged": true } } } }),
+        ))
+        .mount(&github)
+        .await;
+    let engine = engine(Some(&github), None);
+    engine.refresh().await.unwrap();
+
+    engine.merge("gh-pr:acme/tool#3", now()).await.unwrap();
+
+    let requests = github.received_requests().await.unwrap();
+    let merge = requests
+        .iter()
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .find(|body| body.contains("mergePullRequest"))
+        .unwrap();
+    assert!(merge.contains(r#""id":"PR_3""#));
+    assert!(merge.contains(r#""head":"abc123""#));
+    assert!(merge.contains(r#""method":"SQUASH""#));
+
+    assert!(matches!(
+        engine.merge("gh-pr:acme/tool#404", now()).await,
+        Err(EngineError::NotMergeable(_))
+    ));
+}
+
+#[tokio::test]
+async fn quick_add_targets_the_section_of_the_project() {
+    let todoist = todoist(&[]).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/tasks/quick"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&todoist)
+        .await;
+    let mut engine = engine(None, Some(&todoist));
+    let mut config = Config::parse(CONFIG, "test").unwrap();
+    config.projects[0].todoist.as_mut().unwrap().section = "Sunny Tech".to_owned();
+    engine.set_config(config);
+
+    engine
+        .quick_add(Some("acme"), "relire vendredi p2")
+        .await
+        .unwrap();
+    engine.quick_add(None, "acheter du pain").await.unwrap();
+
+    let requests = todoist.received_requests().await.unwrap();
+    let texts: Vec<String> = requests
+        .iter()
+        .filter(|request| request.url.path() == "/api/v1/tasks/quick")
+        .map(|request| {
+            serde_json::from_slice::<Value>(&request.body).unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [r"relire vendredi p2 #Dev /Sunny\ Tech", "acheter du pain"]
+    );
+    assert!(matches!(
+        engine.quick_add(Some("nope"), "x").await,
+        Err(EngineError::UnknownProject(_))
+    ));
+}
+
+#[tokio::test]
+async fn a_configuration_is_proposed_from_owners_and_sections() {
+    let (github, todoist) = (MockServer::start().await, todoist(&[]).await);
+    Mock::given(body_string_contains("organizations"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "data": { "viewer": {
+            "login": "me", "projectsV2": { "nodes": [] },
+            "organizations": { "nodes": [{ "login": "acme", "projectsV2": { "nodes": [
+                { "number": 4, "title": "R", "closed": false }
+            ] } }] },
+        } } })),
+        )
+        .mount(&github)
+        .await;
+    let engine = engine(Some(&github), Some(&todoist));
+
+    let config = engine.propose_config(Some("Dev")).await.unwrap();
+
+    let acme = config
+        .projects
+        .iter()
+        .find(|project| project.id == "acme")
+        .unwrap();
+    assert_eq!(acme.github.as_ref().unwrap().project, Some(4));
+    assert_eq!(acme.todoist.as_ref().unwrap().section, "acme");
+    assert!(matches!(
+        engine.propose_config(Some("Nope")).await,
+        Err(EngineError::UnknownParent(_))
+    ));
 }

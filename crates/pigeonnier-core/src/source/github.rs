@@ -13,8 +13,8 @@ const SOURCE_PR: &str = "github:pull_request";
 const SOURCE_PROJECT_ITEM: &str = "github:project_item";
 
 const PR_FIELDS: &str = "
-    id number title url isDraft updatedAt createdAt reviewDecision mergeable
-    repository { name nameWithOwner owner { login } }
+    id number title url isDraft updatedAt createdAt reviewDecision mergeable headRefOid
+    repository { name nameWithOwner viewerDefaultMergeMethod owner { login } }
     statusCheckRollup { state }
     labels(first: 20) { nodes { name } }
     milestone { dueOn }
@@ -223,6 +223,31 @@ impl GithubClient {
                 return Ok(ProjectRead::Found(items));
             };
             after = cursor;
+        }
+    }
+
+    /// Merges a pull request with the repository's default method. `head` makes GitHub refuse if
+    /// commits arrived since the list was shown.
+    ///
+    /// # Errors
+    /// Any HTTP failure, or what GitHub says when it refuses.
+    pub async fn merge_pull_request(
+        &self,
+        node_id: &str,
+        method: Option<&str>,
+        head: Option<&str>,
+    ) -> Result<(), SourceError> {
+        let query = "mutation($id: ID!, $method: PullRequestMergeMethod, $head: GitObjectID) {
+            mergePullRequest(input: { pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $head }) {
+                pullRequest { merged }
+            }
+        }";
+        let variables = json!({ "id": node_id, "method": method, "head": head });
+        let (_, errors) = self.request(query, variables).await?;
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(SourceError::GraphQl(error_messages(&errors)))
         }
     }
 

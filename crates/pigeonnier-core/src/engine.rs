@@ -11,7 +11,8 @@ use serde_json::Value;
 
 use crate::cache::{Cache, CacheError};
 use crate::config::Config;
-use crate::item::{Item, Kind, Priority};
+use crate::discover;
+use crate::item::{Item, Kind, Priority, Reason, State};
 use crate::normalize::{Context, pull_request, roadmap_item, todoist_item};
 use crate::notify;
 use crate::source::SourceError;
@@ -40,6 +41,10 @@ pub enum EngineError {
     NotTodoist(String),
     #[error("no project {0} with a Todoist section")]
     UnknownProject(String),
+    #[error("{0} is not ready to merge: it changed since the last refresh")]
+    NotMergeable(String),
+    #[error("no Todoist project named {0}")]
+    UnknownParent(String),
 }
 
 /// The last answer of the pull request searches.
@@ -103,6 +108,40 @@ impl Engine {
 
     pub fn set_config(&mut self, config: Config) {
         self.config = config;
+    }
+
+    pub fn set_todoist(&mut self, todoist: Option<TodoistClient>) {
+        self.todoist = todoist;
+    }
+
+    pub fn set_github(&mut self, github: Option<GithubClient>) {
+        self.github = github;
+    }
+    /// Proposes a configuration from the GitHub owners and, with a parent project, Todoist sections.
+    ///
+    /// # Errors
+    /// A missing connection, an unknown parent, or a service failure.
+    pub async fn propose_config(&self, parent: Option<&str>) -> Result<Config, EngineError> {
+        let github = self
+            .github
+            .as_ref()
+            .ok_or(EngineError::NotConnected("GitHub"))?;
+        let owners = github.discover_owners().await?;
+        let sections = match parent {
+            Some(parent) => {
+                let todoist = self
+                    .todoist
+                    .as_ref()
+                    .ok_or(EngineError::NotConnected("Todoist"))?;
+                let state = self.sync_todoist(todoist).await?;
+                let projects: Vec<Value> = state.projects.values().cloned().collect();
+                let sections: Vec<Value> = state.sections.values().cloned().collect();
+                discover::sections_of(&projects, &sections, parent)
+                    .ok_or_else(|| EngineError::UnknownParent(parent.to_owned()))?
+            }
+            None => Vec::new(),
+        };
+        Ok(discover::propose(&owners, &sections, parent))
     }
 
     #[must_use]
@@ -287,7 +326,7 @@ impl Engine {
     /// # Errors
     /// A cache failure.
     pub fn snapshot(&self, view: &str, now: DateTime<FixedOffset>) -> Result<Snapshot, CacheError> {
-        Ok(viewmodel::build(
+        let mut snapshot = viewmodel::build(
             &self.items(now)?,
             &self.config,
             &self.views,
@@ -295,7 +334,10 @@ impl Engine {
             now,
             self.cache.get(KEY_ISSUES)?.unwrap_or_default(),
             self.cache.get(KEY_REFRESHED)?,
-        ))
+        );
+        snapshot.github_connected = self.github.is_some();
+        snapshot.todoist_connected = self.todoist.is_some();
+        Ok(snapshot)
     }
 
     /// Marks a Todoist task done. Syncs first and refuses if the task is already gone, rather than
@@ -411,6 +453,84 @@ impl Engine {
         Ok(())
     }
 
+    /// Adds a task from natural language: `relire la doc vendredi p2`. With a project, it goes to
+    /// that project's section; without, Todoist puts it in its inbox.
+    ///
+    /// # Errors
+    /// A project with no section, no Todoist connection, or a service failure.
+    pub async fn quick_add(&self, project: Option<&str>, text: &str) -> Result<(), EngineError> {
+        let todoist = self
+            .todoist
+            .as_ref()
+            .ok_or(EngineError::NotConnected("Todoist"))?;
+        let target = project.map(|id| self.quick_add_target(id)).transpose()?;
+        let line = match target {
+            Some(target) => format!("{text} {target}"),
+            None => text.to_owned(),
+        };
+        todoist.quick_add(&line).await?;
+        self.sync_todoist(todoist).await?;
+        Ok(())
+    }
+
+    fn quick_add_target(&self, project_id: &str) -> Result<String, EngineError> {
+        let unknown = || EngineError::UnknownProject(project_id.to_owned());
+        let project = self
+            .config
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .ok_or_else(unknown)?;
+        let link = project.todoist.as_ref().ok_or_else(unknown)?;
+        let parent = link
+            .project
+            .as_deref()
+            .or(self.config.defaults.todoist_parent.as_deref());
+        let section = format!("/{}", escape_quick_add(&link.section));
+        Ok(match parent {
+            Some(parent) => format!("#{} {section}", escape_quick_add(parent)),
+            None => section,
+        })
+    }
+
+    /// Merges a PR of mine with the repository's default method, after looking at it again: the
+    /// state on screen may be minutes old, and GitHub refuses if commits arrived in between.
+    ///
+    /// # Errors
+    /// Not a PR of mine ready to merge, no GitHub connection, or GitHub refusing.
+    pub async fn merge(
+        &self,
+        item_id: &str,
+        now: DateTime<FixedOffset>,
+    ) -> Result<(), EngineError> {
+        let github = self
+            .github
+            .as_ref()
+            .ok_or(EngineError::NotConnected("GitHub"))?;
+        self.refresh_prs(github).await?;
+        let prs = self.cached_prs()?.unwrap_or_default();
+        let context = Context {
+            config: &self.config,
+            me: &prs.me,
+            now,
+        };
+        let node = prs.mine.iter().find(|node| {
+            let item = pull_request(&raw_pull_request(node), Kind::MyPr, &context);
+            item.id == item_id && item.state == State::ActionRequired(Reason::ToMerge)
+        });
+        let node = node.ok_or_else(|| EngineError::NotMergeable(item_id.to_owned()))?;
+        github
+            .merge_pull_request(
+                node["id"].as_str().unwrap_or_default(),
+                node.pointer("/repository/viewerDefaultMergeMethod")
+                    .and_then(Value::as_str),
+                node["headRefOid"].as_str(),
+            )
+            .await?;
+        self.refresh_prs(github).await?;
+        Ok(())
+    }
+
     /// Notifications to show now, recording them so each goes out once.
     ///
     /// # Errors
@@ -439,6 +559,11 @@ impl Engine {
     }
 }
 
+/// Quick Add reads a space as the end of a name, unless it is escaped.
+fn escape_quick_add(name: &str) -> String {
+    name.replace(' ', "\\ ")
+}
+
 fn todoist_id(item_id: &str) -> Result<&str, EngineError> {
     item_id
         .strip_prefix("td:")
@@ -461,22 +586,35 @@ fn not_connected(source: &str) -> Issue {
     }
 }
 
+#[must_use]
+pub fn github_client(token: String) -> GithubClient {
+    match std::env::var("PIGEONNIER_GITHUB_API") {
+        Ok(endpoint) => GithubClient::with_endpoint(token, endpoint),
+        Err(_) => GithubClient::new(token),
+    }
+}
+
+#[must_use]
+pub fn todoist_session_client() -> TodoistClient {
+    TodoistClient::with_session(std::env::var("PIGEONNIER_TODOIST_API").ok())
+}
+
+#[must_use]
+pub fn todoist_client(token: String) -> TodoistClient {
+    match std::env::var("PIGEONNIER_TODOIST_API") {
+        Ok(base) => TodoistClient::with_base(token, base),
+        Err(_) => TodoistClient::new(token),
+    }
+}
+
 /// Builds an engine with the tokens available on this machine. `PIGEONNIER_GITHUB_API` and
 /// `PIGEONNIER_TODOIST_API` point it at other servers, which is how the daemon is tested.
 #[must_use]
 pub fn connect(config: Config, cache: Cache) -> Engine {
-    let github = crate::credentials::github_token().map(|token| {
-        match std::env::var("PIGEONNIER_GITHUB_API") {
-            Ok(endpoint) => GithubClient::with_endpoint(token, endpoint),
-            Err(_) => GithubClient::new(token),
-        }
-    });
-    let todoist = crate::credentials::todoist_token().map(|token| {
-        match std::env::var("PIGEONNIER_TODOIST_API") {
-            Ok(base) => TodoistClient::with_base(token, base),
-            Err(_) => TodoistClient::new(token),
-        }
-    });
+    let github = crate::credentials::github_token().map(github_client);
+    let todoist = crate::credentials::todoist_token()
+        .map(todoist_client)
+        .or_else(|| crate::credentials::todoist_session().map(|_| todoist_session_client()));
     let mut engine = Engine::new(config, cache, github, todoist);
     if let Ok(text) = std::fs::read_to_string(crate::paths::views_file()) {
         match serde_json::from_str(&text) {
