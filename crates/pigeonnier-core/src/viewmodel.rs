@@ -14,6 +14,10 @@ use crate::view::View;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// No project is configured yet: the UI offers the first-run setup.
+    pub needs_setup: bool,
+    pub github_connected: bool,
+    pub todoist_connected: bool,
     pub view: String,
     pub views: Vec<ViewChoice>,
     pub projects: Vec<ProjectVm>,
@@ -184,6 +188,9 @@ fn item_vm(item: &Item, now: DateTime<FixedOffset>) -> ItemVm {
     if item.id.starts_with("td:") {
         actions.push("complete".to_owned());
     }
+    if item.state == State::ActionRequired(Reason::ToMerge) && item.kind == Kind::MyPr {
+        actions.push("merge".to_owned());
+    }
     ItemVm {
         id: item.id.clone(),
         kind: kind.to_owned(),
@@ -275,6 +282,9 @@ pub fn build(
     add(OTHERS, "Autres", "gray", false, true);
 
     Snapshot {
+        needs_setup: config.projects.is_empty(),
+        github_connected: false,
+        todoist_connected: false,
         view: view.map_or_else(String::new, |view| view.id.clone()),
         views: views
             .iter()
@@ -532,6 +542,16 @@ mod tests {
         assert!(task.actions.contains(&"complete".to_owned()));
         let pr = item_vm(&item("gh-pr:a/b#1", "a"), now());
         assert!(!pr.actions.contains(&"complete".to_owned()));
+    }
+
+    #[test]
+    fn only_my_prs_ready_to_merge_can_be_merged() {
+        let mut ready = item("gh-pr:a/b#1", "a");
+        ready.kind = Kind::MyPr;
+        ready.state = State::ActionRequired(Reason::ToMerge);
+        assert!(item_vm(&ready, now()).actions.contains(&"merge".to_owned()));
+        ready.state = State::Waiting;
+        assert!(!item_vm(&ready, now()).actions.contains(&"merge".to_owned()));
     }
 
     #[test]

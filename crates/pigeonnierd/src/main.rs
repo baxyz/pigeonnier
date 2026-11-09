@@ -4,6 +4,8 @@
 //! window closed. The app and the GNOME Shell extension are its clients and hold no token.
 
 mod bus;
+mod connection;
+
 mod notifications;
 
 use std::path::PathBuf;
@@ -15,7 +17,7 @@ use anyhow::Result;
 use chrono::{DateTime, FixedOffset, Local};
 use pigeonnier_core::cache::Cache;
 use pigeonnier_core::config::Config;
-use pigeonnier_core::engine::{Engine, connect};
+use pigeonnier_core::engine::{Engine, EngineError, connect};
 use pigeonnier_core::paths;
 use pigeonnier_core::viewmodel::Snapshot;
 use tokio::sync::{Notify, RwLock};
@@ -58,6 +60,24 @@ async fn reload_config(shared: &Shared, path: &PathBuf, seen: &mut Option<System
         Ok(config) => shared.engine.write().await.set_config(config),
         Err(error) => eprintln!("pigeonnierd: keeping the previous configuration: {error}"),
     }
+}
+
+/// Writes the proposed configuration, unless the person already has a file.
+pub(crate) async fn first_run(shared: &Shared, parent: Option<String>) -> Result<(), EngineError> {
+    let config = shared
+        .engine
+        .read()
+        .await
+        .propose_config(parent.as_deref())
+        .await?;
+    let path = paths::config_file();
+    if !path.exists()
+        && let Err(error) = config.save(&path)
+    {
+        eprintln!("pigeonnierd: cannot save the configuration: {error}");
+    }
+    shared.engine.write().await.set_config(config);
+    Ok(())
 }
 
 async fn publish(shared: &Shared, connection: &zbus::Connection, last: &mut String) -> Result<()> {

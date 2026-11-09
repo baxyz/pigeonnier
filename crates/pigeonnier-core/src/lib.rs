@@ -15,6 +15,7 @@ pub mod item;
 pub mod map;
 pub mod normalize;
 pub mod notify;
+pub mod oauth;
 pub mod paths;
 pub mod sort;
 pub mod source;
