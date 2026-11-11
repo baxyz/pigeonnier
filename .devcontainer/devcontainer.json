@@ -3,9 +3,9 @@
   // Stable machine name: Remote Control names the environment "<hostname>:<folder>", and the
   // default hostname is the container id, which changes on every rebuild.
   "runArgs": ["--hostname=pigeonnier"],
-  // Node comes with the image, for the Tauri UI and the GNOME Shell extension of later milestones.
   "image": "mcr.microsoft.com/devcontainers/typescript-node:26",
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends libadwaita-1-dev libgtk-4-dev xvfb xdotool imagemagick gnome-keyring",
+  // GTK and libadwaita to build the app, flatpak to pack it, and a virtual display to look at it.
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends libadwaita-1-dev libgtk-4-dev flatpak xvfb xdotool imagemagick gnome-keyring",
   "features": {
     // ── Infrastructure ───────────────────────────────────────────────────────
     "ghcr.io/helpers4/devcontainer/shell-history:1": {},
