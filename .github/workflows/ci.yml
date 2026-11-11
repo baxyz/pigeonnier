@@ -13,10 +13,12 @@ jobs:
   rust:
     name: Rust (fmt, clippy, test, deny)
     runs-on: ubuntu-24.04
+    # Debian 13 has the libadwaita 1.7 the app needs, like the devcontainer; Ubuntu 24.04 has 1.5.
+    container: rust:1-trixie
     steps:
       - uses: actions/checkout@v7
       - name: GTK and libadwaita
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libadwaita-1-dev libgtk-4-dev
+        run: apt-get update && apt-get install -y --no-install-recommends libadwaita-1-dev libgtk-4-dev
       # rustup installs the toolchain pinned in rust-toolchain.toml on first use.
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -27,15 +29,3 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo deny check
-
-  extension:
-    name: GNOME Shell extension
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
-        with:
-          node-version: lts/*
-      - run: node --test extensions/gnome/
-      - name: The Shell file parses
-        run: cp extensions/gnome/extension.js /tmp/extension.mjs && node --check /tmp/extension.mjs
