@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Pigeonnier
+Comment=What is waiting for you, project by project
+Comment[fr]=Ce qui t'attend, projet par projet
+Exec=pigeonnier
+Icon=io.github.baxyz.Pigeonnier
+Terminal=false
+Type=Application
+Categories=Office;ProjectManagement;GTK;
+Keywords=GitHub;Todoist;pull request;task;roadmap;
+StartupNotify=true
