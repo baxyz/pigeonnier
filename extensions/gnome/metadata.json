@@ -1,8 +1,0 @@
-{
-  "uuid": "pigeonnier@baxyz.github.io",
-  "name": "Pigeonnier",
-  "description": "What is waiting for you, project by project: a counter in the top bar, a menu, and the sidebar docked to the edge of the screen. Needs the pigeonnierd daemon.",
-  "shell-version": ["45", "46", "47", "48", "49", "50"],
-  "url": "https://github.com/baxyz/pigeonnier",
-  "settings-schema": "org.gnome.shell.extensions.pigeonnier"
-}

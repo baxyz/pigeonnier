@@ -16,7 +16,7 @@ use crate::item::{Item, Kind, Priority, Reason, State};
 use crate::normalize::{Context, pull_request, roadmap_item, todoist_item};
 use crate::notify;
 use crate::source::SourceError;
-use crate::source::github::{GithubClient, ProjectRead, raw_project_item, raw_pull_request};
+use crate::source::github::{GithubClient, Owner, ProjectRead, raw_project_item, raw_pull_request};
 use crate::source::todoist::{SyncState, TodoistClient, TodoistCommand};
 use crate::view::{View, default_views};
 use crate::viewmodel::{self, Issue, Snapshot};
@@ -64,6 +64,21 @@ pub struct NewAction {
     pub due: Option<String>,
     pub priority: Option<Priority>,
     pub pr_url: Option<String>,
+}
+
+/// What the settings can offer for a project.
+#[derive(Debug, Clone, Default)]
+pub struct Choices {
+    /// The signed-in account first, then its organizations.
+    pub owners: Vec<Owner>,
+    pub todoist: Vec<TodoistChoice>,
+}
+
+/// A Todoist project and its sections, in the order Todoist shows them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoistChoice {
+    pub name: String,
+    pub sections: Vec<String>,
 }
 
 pub struct Engine {
@@ -142,6 +157,23 @@ impl Engine {
             None => Vec::new(),
         };
         Ok(discover::propose(&owners, &sections, parent))
+    }
+
+    /// What the settings can offer: the GitHub owners with their Projects, and the Todoist projects
+    /// with their sections. A service that is not connected offers nothing.
+    ///
+    /// # Errors
+    /// A service failure, or the cache.
+    pub async fn choices(&self) -> Result<Choices, EngineError> {
+        let owners = match &self.github {
+            Some(github) => github.discover_owners().await?,
+            None => Vec::new(),
+        };
+        let todoist = match &self.todoist {
+            Some(todoist) => todoist_choices(&self.sync_todoist(todoist).await?),
+            None => Vec::new(),
+        };
+        Ok(Choices { owners, todoist })
     }
 
     #[must_use]
@@ -578,6 +610,44 @@ fn issue(source: &str, error: &SourceError) -> Issue {
     }
 }
 
+fn order(value: &Value, field: &str) -> i64 {
+    value[field].as_i64().unwrap_or(0)
+}
+
+fn is_archived(value: &Value) -> bool {
+    value["is_archived"] == Value::Bool(true)
+}
+
+/// The Todoist projects and their sections, as the Todoist app orders them.
+fn todoist_choices(state: &SyncState) -> Vec<TodoistChoice> {
+    let mut projects: Vec<&Value> = state
+        .projects
+        .values()
+        .filter(|project| !is_archived(project))
+        .collect();
+    projects.sort_by_key(|project| order(project, "child_order"));
+    projects
+        .into_iter()
+        .filter_map(|project| {
+            let id = project["id"].as_str()?;
+            let mut sections: Vec<&Value> = state
+                .sections
+                .values()
+                .filter(|section| section["project_id"].as_str() == Some(id))
+                .filter(|section| !is_archived(section))
+                .collect();
+            sections.sort_by_key(|section| order(section, "section_order"));
+            Some(TodoistChoice {
+                name: project["name"].as_str()?.to_owned(),
+                sections: sections
+                    .into_iter()
+                    .filter_map(|section| section["name"].as_str().map(str::to_owned))
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
 fn not_connected(source: &str) -> Issue {
     Issue {
         source: source.to_owned(),
@@ -608,7 +678,7 @@ pub fn todoist_client(token: String) -> TodoistClient {
 }
 
 /// Builds an engine with the tokens available on this machine. `PIGEONNIER_GITHUB_API` and
-/// `PIGEONNIER_TODOIST_API` point it at other servers, which is how the daemon is tested.
+/// `PIGEONNIER_TODOIST_API` point it at other servers, which is how the app is tested.
 #[must_use]
 pub fn connect(config: Config, cache: Cache) -> Engine {
     let github = crate::credentials::github_token().map(github_client);
@@ -623,4 +693,47 @@ pub fn connect(config: Config, cache: Cache) -> Engine {
         }
     }
     engine
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn todoist_choices_follow_the_order_of_the_app_and_skip_archives() {
+        let mut state = SyncState::default();
+        for project in [
+            json!({ "id": "p2", "name": "Perso", "child_order": 2 }),
+            json!({ "id": "p1", "name": "Dev", "child_order": 1 }),
+            json!({ "id": "p3", "name": "Old", "child_order": 0, "is_archived": true }),
+        ] {
+            state
+                .projects
+                .insert(project["id"].as_str().unwrap().to_owned(), project);
+        }
+        for section in [
+            json!({ "id": "s2", "project_id": "p1", "name": "helpers4", "section_order": 2 }),
+            json!({ "id": "s1", "project_id": "p1", "name": "baxyz", "section_order": 1 }),
+            json!({ "id": "s3", "project_id": "p1", "name": "gone", "is_archived": true }),
+        ] {
+            state
+                .sections
+                .insert(section["id"].as_str().unwrap().to_owned(), section);
+        }
+        assert_eq!(
+            todoist_choices(&state),
+            vec![
+                TodoistChoice {
+                    name: "Dev".to_owned(),
+                    sections: vec!["baxyz".to_owned(), "helpers4".to_owned()],
+                },
+                TodoistChoice {
+                    name: "Perso".to_owned(),
+                    sections: Vec::new(),
+                },
+            ]
+        );
+    }
 }

@@ -101,11 +101,15 @@ pub fn sections_of(projects: &[Value], sections: &[Value], parent: &str) -> Opti
     )
 }
 
-fn color(index: usize) -> String {
+/// The color of the project at `index`, cycling through the GNOME palette.
+#[must_use]
+pub fn color(index: usize) -> String {
     PALETTE[index % PALETTE.len()].to_owned()
 }
 
-fn slug(name: &str) -> String {
+/// A stable identifier for a project name: lower case, without accents, words joined by dashes.
+#[must_use]
+pub fn slug(name: &str) -> String {
     let lower = name.to_lowercase();
     let parts: Vec<String> = lower
         .split(|character: char| !character.is_alphanumeric())
