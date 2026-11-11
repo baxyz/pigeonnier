@@ -1,97 +1,308 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The daemon, seen from the window.
+//! The engine, inside the app: it keeps the list fresh in the background and runs the actions the
+//! window asks for. Every function returns a message a person can read when it fails.
 
-use chrono::Local;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
+
+use chrono::{DateTime, FixedOffset, Local};
+use pigeonnier_core::cache::Cache;
+use pigeonnier_core::config::Config;
+use pigeonnier_core::credentials;
+use pigeonnier_core::engine::{Choices, Engine, connect, github_client, todoist_session_client};
+use pigeonnier_core::oauth::{CALLBACK_PORT, github_device_flow, start_todoist_login};
+use pigeonnier_core::paths;
 use pigeonnier_core::viewmodel::Snapshot;
 use pigeonnier_core::when::parse_until;
-use zbus::proxy;
+use tokio::sync::{Notify, RwLock};
 
-#[proxy(
-    interface = "io.github.baxyz.Pigeonnier1",
-    default_service = "io.github.baxyz.Pigeonnier",
-    default_path = "/io/github/baxyz/Pigeonnier"
-)]
-pub trait Daemon {
-    fn get_view(&self, view: &str) -> zbus::Result<String>;
-    fn refresh(&self) -> zbus::Result<()>;
-    fn complete(&self, item_id: &str) -> zbus::Result<()>;
-    fn snooze(&self, item_id: &str, until_unix: i64) -> zbus::Result<()>;
-    fn merge(&self, item_id: &str) -> zbus::Result<()>;
-    fn add_task(&self, project: &str, text: &str) -> zbus::Result<()>;
-    fn setup(&self, todoist_parent: &str) -> zbus::Result<()>;
-    fn connect_github(&self) -> zbus::Result<(String, String)>;
-    fn connect_todoist(&self) -> zbus::Result<String>;
-    fn disconnect(&self, service: &str) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    fn changed(&self, revision: u32) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    fn window_requested(&self, mode: String) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    fn connection_failed(&self, service: String, message: String) -> zbus::Result<()>;
+/// What the window hears from the background.
+#[derive(Debug)]
+pub enum Event {
+    /// The list may have changed: read it again.
+    Changed,
+    /// Something failed in the background: starting, or a connection started earlier.
+    Failed(String),
 }
 
-pub async fn connect() -> zbus::Result<DaemonProxy<'static>> {
-    let connection = zbus::Connection::session().await?;
-    DaemonProxy::new(&connection).await
+type Listener = Box<dyn Fn(Event) + Send + Sync>;
+
+struct Service {
+    engine: RwLock<Engine>,
+    refresh: Notify,
+    listener: Listener,
+    config_path: PathBuf,
+    config_seen: Mutex<Option<SystemTime>>,
 }
 
-/// The view, or a message for the person: the window must stay useful to say the daemon is away.
-pub async fn load(view: &str) -> Result<Snapshot, String> {
-    let daemon = connect().await.map_err(|error| error.to_string())?;
-    let text = daemon
-        .get_view(view)
-        .await
-        .map_err(|error| error.to_string())?;
-    serde_json::from_str(&text).map_err(|error| error.to_string())
+static SERVICE: OnceLock<Arc<Service>> = OnceLock::new();
+
+fn now() -> DateTime<FixedOffset> {
+    Local::now().fixed_offset()
 }
 
-pub async fn refresh() -> zbus::Result<()> {
-    connect().await?.refresh().await
+#[allow(clippy::needless_pass_by_value)] // Used as `map_err(readable)`.
+fn readable(error: impl std::fmt::Display) -> String {
+    error.to_string()
 }
 
-pub async fn complete(item_id: &str) -> zbus::Result<()> {
-    connect().await?.complete(item_id).await
+fn service() -> Result<Arc<Service>, String> {
+    SERVICE
+        .get()
+        .cloned()
+        .ok_or_else(|| "Pigeonnier n'a pas encore démarré".to_owned())
 }
 
-pub async fn snooze(item_id: &str, until: &str) -> zbus::Result<()> {
-    let now = Local::now().fixed_offset();
-    let until = parse_until(until, now)
-        .ok_or_else(|| zbus::Error::Failure(format!("cannot read {until}")))?;
-    connect().await?.snooze(item_id, until.timestamp()).await
+fn modified(path: &PathBuf) -> Option<SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
 }
 
-pub async fn merge(item_id: &str) -> zbus::Result<()> {
-    connect().await?.merge(item_id).await
-}
-
-pub async fn add_task(project: &str, text: &str) -> zbus::Result<()> {
-    connect().await?.add_task(project, text).await
-}
-
-pub async fn setup(parent: &str) -> zbus::Result<()> {
-    connect().await?.setup(parent).await
-}
-
-pub async fn connect_github() -> zbus::Result<(String, String)> {
-    connect().await?.connect_github().await
-}
-
-pub async fn connect_todoist() -> zbus::Result<String> {
-    connect().await?.connect_todoist().await
-}
-
-pub async fn disconnect(service: &str) -> zbus::Result<()> {
-    connect().await?.disconnect(service).await
-}
-
-/// What a person can read from an error of the daemon.
-pub fn message(error: &zbus::Error) -> String {
-    match error {
-        zbus::Error::MethodError(_, Some(text), _) => text.clone(),
-        other => other.to_string(),
+impl Service {
+    fn mark_config_seen(&self) {
+        *self
+            .config_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = modified(&self.config_path);
     }
+
+    /// Picks up a configuration edited by hand.
+    async fn reload_config(&self) {
+        let current = modified(&self.config_path);
+        {
+            let mut seen = self
+                .config_seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if current == *seen {
+                return;
+            }
+            seen.clone_from(&current);
+        }
+        match Config::load(&self.config_path) {
+            Ok(config) => self.engine.write().await.set_config(config),
+            Err(error) => eprintln!("pigeonnier: keeping the previous configuration: {error}"),
+        }
+    }
+
+    async fn run(self: Arc<Self>) {
+        loop {
+            self.reload_config().await;
+            let interval = {
+                let engine = self.engine.read().await;
+                if let Err(error) = engine.refresh().await {
+                    eprintln!("pigeonnier: refresh failed: {error}");
+                }
+                engine
+                    .config()
+                    .defaults
+                    .refresh_interval()
+                    .to_std()
+                    .unwrap_or(Duration::from_secs(300))
+            };
+            (self.listener)(Event::Changed);
+            tokio::select! {
+                () = tokio::time::sleep(interval) => {}
+                () = self.refresh.notified() => {}
+            }
+        }
+    }
+}
+
+/// Opens the configuration, the cache and the keyring in the background, then keeps the list fresh
+/// until the app quits. The window hears [`Event::Changed`] as soon as the cached list can be read.
+pub fn start(listener: impl Fn(Event) + Send + Sync + 'static) {
+    let listener: Listener = Box::new(listener);
+    relm4::spawn(async move {
+        let config_path = paths::config_file();
+        let opened = tokio::task::spawn_blocking({
+            let config_path = config_path.clone();
+            move || {
+                let config = Config::load(&config_path).map_err(readable)?;
+                let cache = Cache::open(&paths::cache_file()).map_err(readable)?;
+                // Reading the tokens waits on the keyring: never on the window's thread.
+                Ok::<_, String>(connect(config, cache))
+            }
+        })
+        .await
+        .map_err(readable)
+        .and_then(|opened| opened);
+        let engine = match opened {
+            Ok(engine) => engine,
+            Err(error) => return listener(Event::Failed(error)),
+        };
+        let service = Arc::new(Service {
+            engine: RwLock::new(engine),
+            refresh: Notify::new(),
+            listener,
+            config_seen: Mutex::new(modified(&config_path)),
+            config_path,
+        });
+        if SERVICE.set(Arc::clone(&service)).is_ok() {
+            (service.listener)(Event::Changed);
+            service.run().await;
+        }
+    });
+}
+
+/// Asks for a refresh now; the window hears [`Event::Changed`] when it is done.
+pub fn refresh() {
+    if let Ok(service) = service() {
+        service.refresh.notify_one();
+    }
+}
+
+pub async fn load(view: &str) -> Result<Snapshot, String> {
+    let service = service()?;
+    let engine = service.engine.read().await;
+    engine.snapshot(view, now()).map_err(readable)
+}
+
+pub async fn complete(item_id: &str) -> Result<(), String> {
+    let service = service()?;
+    let result = service.engine.read().await.complete(item_id).await;
+    service.refresh.notify_one();
+    result.map_err(readable)
+}
+
+pub async fn snooze(item_id: &str, until: &str) -> Result<(), String> {
+    let until = parse_until(until, now()).ok_or_else(|| format!("je ne comprends pas {until}"))?;
+    let service = service()?;
+    let result = service.engine.read().await.snooze(item_id, until).await;
+    service.refresh.notify_one();
+    result.map_err(readable)
+}
+
+pub async fn merge(item_id: &str) -> Result<(), String> {
+    let service = service()?;
+    let result = service.engine.read().await.merge(item_id, now()).await;
+    service.refresh.notify_one();
+    result.map_err(readable)
+}
+
+/// Adds a task in natural language. No project means the Todoist inbox.
+pub async fn add_task(project: Option<String>, text: &str) -> Result<(), String> {
+    let service = service()?;
+    let result = service
+        .engine
+        .read()
+        .await
+        .quick_add(project.as_deref(), text)
+        .await;
+    service.refresh.notify_one();
+    result.map_err(readable)
+}
+
+/// The configuration in use, to edit in the settings.
+pub async fn config() -> Result<Config, String> {
+    Ok(service()?.engine.read().await.config().clone())
+}
+
+/// What the settings can offer, read from the connected services.
+pub async fn choices() -> Result<Choices, String> {
+    service()?
+        .engine
+        .read()
+        .await
+        .choices()
+        .await
+        .map_err(readable)
+}
+
+/// Writes the configuration and refreshes with it.
+pub async fn save_config(config: Config) -> Result<(), String> {
+    let service = service()?;
+    config.save(&service.config_path).map_err(readable)?;
+    service.mark_config_seen();
+    service.engine.write().await.set_config(config);
+    service.refresh.notify_one();
+    Ok(())
+}
+
+/// Starts connecting GitHub: returns the code to enter and the page to enter it on, and goes on
+/// waiting for the person in the background.
+pub async fn connect_github() -> Result<(String, String), String> {
+    let service = service()?;
+    let flow = github_device_flow().ok_or_else(|| {
+        "Cette version de Pigeonnier ne sait pas encore se connecter à GitHub : il lui manque \
+         l'identifiant de son application GitHub."
+            .to_owned()
+    })?;
+    let code = flow.start().await.map_err(readable)?;
+    let answer = (code.user_code.clone(), code.verification_uri.clone());
+    relm4::spawn(async move {
+        match flow.wait_for_token(&code).await {
+            Ok(token) => {
+                if let Err(error) = credentials::store(credentials::GITHUB, &token) {
+                    eprintln!("pigeonnier: GitHub stays connected until the app quits: {error}");
+                }
+                service
+                    .engine
+                    .write()
+                    .await
+                    .set_github(Some(github_client(token)));
+                service.refresh.notify_one();
+            }
+            Err(error) => (service.listener)(Event::Failed(format!(
+                "La connexion à GitHub a échoué : {error}"
+            ))),
+        }
+    });
+    Ok(answer)
+}
+
+/// Starts connecting Todoist: returns the page to open, and waits for the browser to come back.
+pub async fn connect_todoist() -> Result<String, String> {
+    let service = service()?;
+    let metadata = std::env::var("PIGEONNIER_TODOIST_METADATA").ok();
+    let login = start_todoist_login(metadata.as_deref(), CALLBACK_PORT)
+        .await
+        .map_err(readable)?;
+    let url = login.url.clone();
+    relm4::spawn(async move {
+        let result = async {
+            let session = login.finish().await.map_err(readable)?;
+            credentials::store_todoist_session(&session).map_err(readable)
+        };
+        match result.await {
+            Ok(()) => {
+                service
+                    .engine
+                    .write()
+                    .await
+                    .set_todoist(Some(todoist_session_client()));
+                service.refresh.notify_one();
+            }
+            Err(error) => (service.listener)(Event::Failed(format!(
+                "La connexion à Todoist a échoué : {error}"
+            ))),
+        }
+    });
+    Ok(url)
+}
+
+/// Removes the tokens of `github` or `todoist` and forgets what was read from it.
+pub async fn disconnect(service_name: &str) -> Result<(), String> {
+    let service = service()?;
+    {
+        let mut engine = service.engine.write().await;
+        match service_name {
+            "github" => {
+                credentials::forget(credentials::GITHUB).map_err(readable)?;
+                engine.set_github(None);
+                engine.purge_service("github.").map_err(readable)?;
+            }
+            "todoist" => {
+                credentials::forget_todoist().map_err(readable)?;
+                engine.set_todoist(None);
+                engine.purge_service("todoist.").map_err(readable)?;
+            }
+            other => return Err(format!("service inconnu : {other}")),
+        }
+    }
+    service.refresh.notify_one();
+    Ok(())
 }

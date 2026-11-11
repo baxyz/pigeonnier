@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Draws what the daemon prepares and sends actions back. The narrow layout is the sidebar: it is a
+//! Draws what the engine prepares and sends actions back. The narrow layout is the sidebar: it is a
 //! breakpoint of this one window, not a second window to maintain.
 
-mod client;
+mod service;
+mod settings;
 
-use futures_util::{StreamExt as _, stream};
+use pigeonnier_core::config::Config;
+use pigeonnier_core::engine::Choices;
 use pigeonnier_core::viewmodel::{ItemVm, ProjectVm, Snapshot};
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, RelmApp, SimpleComponent, adw, gtk};
 
-/// Not the name of the daemon, which owns `io.github.baxyz.Pigeonnier` on the bus.
-const APP_ID: &str = "io.github.baxyz.Pigeonnier.Gnome";
+use crate::settings::Edit;
+
+const APP_ID: &str = "io.github.baxyz.Pigeonnier";
 const SIDEBAR_SIZE: (i32, i32) = (340, 900);
 const FULL_SIZE: (i32, i32) = (1100, 760);
 
@@ -26,7 +29,6 @@ enum Msg {
     Complete(String),
     Snooze(String, &'static str),
     ActionDone(Result<(), String>),
-    Mode(String),
     Key(char),
     Compact(bool),
     AskMerge(String, String),
@@ -34,14 +36,21 @@ enum Msg {
     QuickAdd(String),
     Search(String),
     Failed(String),
-    ShowConnections,
-    HideConnections,
+    ShowSettings,
+    HideSettings,
     ConnectGithub,
     ConnectTodoist,
     GithubCode(String, String),
     OpenPage(String),
     Disconnect(&'static str),
-    FinishSetup(String),
+    LoadChoices,
+    ChoicesLoaded(Result<(Config, Choices), String>),
+    EditProject(usize, Edit),
+    AddProject,
+    Propose(Option<String>),
+    Expanded(usize, bool),
+    SaveProjects,
+    Saved(Result<(), String>),
 }
 
 struct App {
@@ -56,7 +65,14 @@ struct App {
     search_entry: gtk::SearchEntry,
     search: String,
     quick: gtk::Entry,
-    connections_open: bool,
+    settings_open: bool,
+    /// The projects being edited in the settings, saved only on "Enregistrer".
+    draft: Option<Config>,
+    choices: Option<Choices>,
+    choices_error: Option<String>,
+    loading_choices: bool,
+    /// The project open in the settings, kept open when the page is drawn again.
+    expanded: Option<usize>,
     projects: gtk::ListBox,
     list: gtk::Box,
     view: String,
@@ -81,11 +97,11 @@ fn dot_color(color: &str) -> &str {
     }
 }
 
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     gtk::glib::markup_escape_text(text).to_string()
 }
 
-fn dot(color: &str) -> gtk::Label {
+pub(crate) fn dot(color: &str) -> gtk::Label {
     let label = gtk::Label::new(None);
     label.set_markup(&format!(
         "<span foreground=\"{}\">●</span>",
@@ -236,8 +252,9 @@ impl App {
         let Some(mut snapshot) = self.snapshot.clone() else {
             return;
         };
-        if snapshot.needs_setup || self.connections_open {
-            self.draw_connections(&snapshot);
+        self.place_views();
+        if snapshot.needs_setup || self.settings_open {
+            self.draw_settings(&snapshot);
             return;
         }
         let query = self.search.to_lowercase();
@@ -280,84 +297,6 @@ impl App {
             let group = self.project_group(project);
             self.list.append(&group);
         }
-    }
-
-    /// The first thing a new user sees, and where services are connected and disconnected later.
-    fn draw_connections(&self, snapshot: &Snapshot) {
-        let services = adw::PreferencesGroup::new();
-        services.set_title("Connexions");
-        services.set_description(Some(
-            "Pigeonnier lit tes PR et tes tâches. Les jetons restent dans le trousseau de ce poste.",
-        ));
-        let add = |name: &str, connected: bool, connect: fn() -> Msg, service: &'static str| {
-            let row = adw::ActionRow::new();
-            row.set_title(name);
-            row.set_subtitle(if connected {
-                "Connecté"
-            } else {
-                "Non connecté"
-            });
-            let button = gtk::Button::with_label(if connected {
-                "Déconnecter"
-            } else {
-                "Connecter"
-            });
-            button.set_valign(gtk::Align::Center);
-            if !connected {
-                button.add_css_class("suggested-action");
-            }
-            let sender = self.sender.clone();
-            button.connect_clicked(move |_| {
-                if connected {
-                    sender.input(Msg::Disconnect(service));
-                } else {
-                    sender.input(connect());
-                }
-            });
-            row.add_suffix(&button);
-            services.add(&row);
-        };
-        add(
-            "GitHub",
-            snapshot.github_connected,
-            || Msg::ConnectGithub,
-            "github",
-        );
-        add(
-            "Todoist",
-            snapshot.todoist_connected,
-            || Msg::ConnectTodoist,
-            "todoist",
-        );
-        self.list.append(&services);
-
-        let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        footer.set_halign(gtk::Align::End);
-        if snapshot.needs_setup {
-            let projects = adw::PreferencesGroup::new();
-            projects.set_title("Projets");
-            projects.set_description(Some(
-                "Une org GitHub, son Project et une section Todoist forment un projet. Indique le projet Todoist qui contient une section par projet, ou laisse vide.",
-            ));
-            let parent = adw::EntryRow::new();
-            parent.set_title("Projet Todoist parent");
-            projects.add(&parent);
-            self.list.append(&projects);
-            let finish = gtk::Button::with_label("Créer mes projets");
-            finish.add_css_class("suggested-action");
-            finish.set_sensitive(snapshot.github_connected);
-            let sender = self.sender.clone();
-            finish.connect_clicked(move |_| {
-                sender.input(Msg::FinishSetup(parent.text().to_string()));
-            });
-            footer.append(&finish);
-        } else {
-            let close = gtk::Button::with_label("Fermer");
-            let sender = self.sender.clone();
-            close.connect_clicked(move |_| sender.input(Msg::HideConnections));
-            footer.append(&close);
-        }
-        self.list.append(&footer);
     }
 
     fn draw_projects(&self) {
@@ -447,12 +386,12 @@ impl App {
                 parts.join(" · ")
             },
             |error| {
-                eprintln!("pigeonnier-gnome: {error}");
-                "Le démon ne répond pas : lance pigeonnierd".to_owned()
+                eprintln!("pigeonnier: {error}");
+                error.to_owned()
             },
         );
-        // The connections page already says the same thing.
-        let on_connections = self.connections_open
+        // The settings page already says the same thing.
+        let on_connections = self.settings_open
             || self
                 .snapshot
                 .as_ref()
@@ -465,8 +404,29 @@ impl App {
             .set_button_label(reconnect.then_some("Connecter"));
     }
 
+    fn in_settings(&self) -> bool {
+        self.settings_open
+            || self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.needs_setup)
+    }
+
     /// In the narrow layout the filters no longer fit in the header, so they get a bar of their own.
+    /// The settings show none of the list's controls.
     fn place_views(&self) {
+        let in_settings = self.in_settings();
+        self.quick.set_visible(!in_settings);
+        self.header.set_show_back_button(!in_settings);
+        self.split.set_collapsed(in_settings || self.compact);
+        if in_settings {
+            self.split.set_show_content(true);
+            self.views_bar.set_center_widget(None::<&gtk::Widget>);
+            self.views_bar.set_visible(false);
+            let title = adw::WindowTitle::new("Pigeonnier", "Réglages");
+            self.header.set_title_widget(Some(&title));
+            return;
+        }
         if self.compact {
             self.header.set_title_widget(None::<&gtk::Widget>);
             self.views_bar.set_center_widget(Some(&self.views));
@@ -485,6 +445,9 @@ impl App {
     }
 
     fn on_key(&mut self, key: char) {
+        if self.in_settings() {
+            return;
+        }
         let current = self
             .rows
             .iter()
@@ -546,52 +509,27 @@ impl App {
 fn spawn_load(sender: &ComponentSender<App>, view: String) {
     let sender = sender.clone();
     relm4::spawn(async move {
-        sender.input(Msg::Loaded(client::load(&view).await));
+        sender.input(Msg::Loaded(service::load(&view).await));
     });
 }
 
-/// Runs an action of the daemon and reports its failure to the window.
+/// Runs an action of the engine and reports its failure to the window.
 fn run<F>(sender: &ComponentSender<App>, action: F)
 where
-    F: Future<Output = zbus::Result<()>> + Send + 'static,
+    F: Future<Output = Result<(), String>> + Send + 'static,
 {
     let sender = sender.clone();
     relm4::spawn(async move {
-        let result = action.await.map_err(|error| client::message(&error));
-        sender.input(Msg::ActionDone(result));
+        sender.input(Msg::ActionDone(action.await));
     });
 }
 
-/// Follows the daemon: its changes, its requests for the window, and its coming back after a stop.
-fn follow_daemon(sender: ComponentSender<App>) {
-    relm4::spawn(async move {
-        loop {
-            if let Ok(daemon) = client::connect().await
-                && let (Ok(changed), Ok(requested), Ok(failed)) = (
-                    daemon.receive_changed().await,
-                    daemon.receive_window_requested().await,
-                    daemon.receive_connection_failed().await,
-                )
-            {
-                sender.input(Msg::Load);
-                let changed = changed.map(|_| Some(Msg::Load));
-                let requested = requested
-                    .map(|signal| signal.args().ok().map(|args| Msg::Mode(args.mode.clone())));
-                let failed = failed.map(|signal| {
-                    signal
-                        .args()
-                        .ok()
-                        .map(|args| Msg::Failed(args.message.clone()))
-                });
-                let mut events = stream::select(changed, stream::select(requested, failed));
-                while let Some(event) = events.next().await {
-                    if let Some(message) = event {
-                        sender.input(message);
-                    }
-                }
-            }
-            relm4::tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
+/// Starts the engine, which tells the window when the list changes or something fails.
+fn start_service(sender: &ComponentSender<App>) {
+    let input = sender.input_sender().clone();
+    service::start(move |event| match event {
+        service::Event::Changed => input.emit(Msg::Load),
+        service::Event::Failed(message) => input.emit(Msg::Failed(message)),
     });
 }
 
@@ -640,14 +578,14 @@ impl SimpleComponent for App {
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&views));
         header.pack_end(&refresh);
-        let connections = icon_button("system-users-symbolic", "Connexions");
-        let connections_sender = sender.clone();
-        connections.connect_clicked(move |_| connections_sender.input(Msg::ShowConnections));
-        header.pack_end(&connections);
+        let settings = icon_button("emblem-system-symbolic", "Réglages");
+        let settings_sender = sender.clone();
+        settings.connect_clicked(move |_| settings_sender.input(Msg::ShowSettings));
+        header.pack_end(&settings);
 
         let banner = adw::Banner::new("");
         let banner_sender = sender.clone();
-        banner.connect_button_clicked(move |_| banner_sender.input(Msg::ShowConnections));
+        banner.connect_button_clicked(move |_| banner_sender.input(Msg::ShowSettings));
 
         let search_entry = gtk::SearchEntry::new();
         search_entry.set_hexpand(true);
@@ -740,7 +678,12 @@ impl SimpleComponent for App {
             search_entry,
             search: String::new(),
             quick,
-            connections_open: false,
+            settings_open: false,
+            draft: None,
+            choices: None,
+            choices_error: None,
+            loading_choices: false,
+            expanded: None,
             projects,
             list,
             view: "all".to_owned(),
@@ -751,8 +694,7 @@ impl SimpleComponent for App {
             sender: sender.clone(),
         };
         model.apply_mode(&mode);
-        spawn_load(&sender, model.view.clone());
-        follow_daemon(sender);
+        start_service(&sender);
         ComponentParts { model, widgets: () }
     }
 
@@ -765,6 +707,14 @@ impl SimpleComponent for App {
                     .snapshot
                     .as_ref()
                     .is_none_or(|known| known.views != snapshot.views);
+                let accounts_changed = self.snapshot.as_ref().is_none_or(|known| {
+                    (known.github_connected, known.todoist_connected)
+                        != (snapshot.github_connected, snapshot.todoist_connected)
+                });
+                let in_settings = self.settings_open || snapshot.needs_setup;
+                if in_settings && (accounts_changed || self.choices.is_none()) {
+                    sender.input(Msg::LoadChoices);
+                }
                 self.snapshot = Some(snapshot);
                 if views_changed {
                     self.draw_views();
@@ -774,13 +724,7 @@ impl SimpleComponent for App {
                 self.draw_banner(None);
             }
             Msg::Loaded(Err(error)) => self.draw_banner(Some(&error)),
-            Msg::Refresh => {
-                relm4::spawn(async {
-                    if let Err(error) = client::refresh().await {
-                        eprintln!("pigeonnier-gnome: {error}");
-                    }
-                });
-            }
+            Msg::Refresh => service::refresh(),
             Msg::SetView(view) => {
                 self.view = view;
                 spawn_load(&sender, self.view.clone());
@@ -802,9 +746,11 @@ impl SimpleComponent for App {
                     },
                 );
             }
-            Msg::Complete(id) => run(&sender, async move { client::complete(&id).await }),
-            Msg::Snooze(id, until) => run(&sender, async move { client::snooze(&id, until).await }),
-            Msg::Merge(id) => run(&sender, async move { client::merge(&id).await }),
+            Msg::Complete(id) => run(&sender, async move { service::complete(&id).await }),
+            Msg::Snooze(id, until) => {
+                run(&sender, async move { service::snooze(&id, until).await });
+            }
+            Msg::Merge(id) => run(&sender, async move { service::merge(&id).await }),
             Msg::AskMerge(id, title) => {
                 let dialog =
                     adw::AlertDialog::new(Some("Merger cette PR ?"), Some(&escape(&title)));
@@ -819,10 +765,10 @@ impl SimpleComponent for App {
                 dialog.present(Some(&self.window));
             }
             Msg::QuickAdd(text) => {
-                let project = self.project.clone().unwrap_or_default();
+                let project = self.project.clone();
                 run(
                     &sender,
-                    async move { client::add_task(&project, &text).await },
+                    async move { service::add_task(project, &text).await },
                 );
             }
             Msg::Search(query) => {
@@ -834,32 +780,36 @@ impl SimpleComponent for App {
                 self.banner.set_button_label(None);
                 self.banner.set_revealed(true);
             }
-            Msg::ShowConnections => {
-                self.connections_open = true;
+            Msg::ShowSettings => {
+                self.settings_open = true;
                 self.split.set_show_content(true);
+                sender.input(Msg::LoadChoices);
                 self.draw_list();
                 self.draw_banner(None);
             }
-            Msg::HideConnections => {
-                self.connections_open = false;
+            Msg::HideSettings => {
+                self.settings_open = false;
+                self.draft = None;
+                self.choices = None;
+                self.expanded = None;
                 self.draw_list();
                 self.draw_banner(None);
             }
             Msg::ConnectGithub => {
                 let sender = sender.clone();
                 relm4::spawn(async move {
-                    sender.input(match client::connect_github().await {
+                    sender.input(match service::connect_github().await {
                         Ok((code, url)) => Msg::GithubCode(code, url),
-                        Err(error) => Msg::Failed(client::message(&error)),
+                        Err(error) => Msg::Failed(error),
                     });
                 });
             }
             Msg::ConnectTodoist => {
                 let sender = sender.clone();
                 relm4::spawn(async move {
-                    sender.input(match client::connect_todoist().await {
+                    sender.input(match service::connect_todoist().await {
                         Ok(url) => Msg::OpenPage(url),
-                        Err(error) => Msg::Failed(client::message(&error)),
+                        Err(error) => Msg::Failed(error),
                     });
                 });
             }
@@ -882,9 +832,86 @@ impl SimpleComponent for App {
             }
             Msg::OpenPage(url) => sender.input(Msg::Open(url)),
             Msg::Disconnect(service) => {
-                run(&sender, async move { client::disconnect(service).await });
+                run(&sender, async move { service::disconnect(service).await });
             }
-            Msg::FinishSetup(parent) => run(&sender, async move { client::setup(&parent).await }),
+            Msg::LoadChoices => {
+                if !self.loading_choices {
+                    self.loading_choices = true;
+                    self.choices_error = None;
+                    let sender = sender.clone();
+                    relm4::spawn(async move {
+                        let result =
+                            async { Ok((service::config().await?, service::choices().await?)) };
+                        sender.input(Msg::ChoicesLoaded(result.await));
+                    });
+                }
+            }
+            Msg::ChoicesLoaded(result) => {
+                self.loading_choices = false;
+                match result {
+                    Ok((config, choices)) => {
+                        if self.draft.is_none() {
+                            self.draft = Some(if config.projects.is_empty() {
+                                let parent = settings::guess_parent(&choices);
+                                settings::propose(&choices, parent.as_deref())
+                            } else {
+                                config
+                            });
+                        }
+                        self.choices = Some(choices);
+                    }
+                    Err(error) => self.choices_error = Some(error),
+                }
+                self.draw_list();
+            }
+            Msg::EditProject(index, edit) => {
+                if let Some(draft) = &mut self.draft {
+                    if matches!(edit, Edit::Remove) {
+                        self.expanded = None;
+                    }
+                    if settings::apply(draft, index, edit) {
+                        self.draw_list();
+                    }
+                }
+            }
+            Msg::AddProject => {
+                if let Some(draft) = &mut self.draft {
+                    let index = draft.projects.len();
+                    draft.projects.push(settings::new_project(index));
+                    self.expanded = Some(index);
+                    self.draw_list();
+                }
+            }
+            Msg::Propose(parent) => {
+                if let (Some(draft), Some(choices)) = (&mut self.draft, &self.choices) {
+                    let proposal = settings::propose(choices, parent.as_deref());
+                    draft.defaults.todoist_parent = proposal.defaults.todoist_parent;
+                    draft.projects = proposal.projects;
+                    self.expanded = None;
+                    self.draw_list();
+                }
+            }
+            Msg::Expanded(index, open) => {
+                if open {
+                    self.expanded = Some(index);
+                } else if self.expanded == Some(index) {
+                    self.expanded = None;
+                }
+            }
+            Msg::SaveProjects => {
+                if let Some(draft) = self.draft.clone() {
+                    let config = settings::finalize(draft);
+                    let sender = sender.clone();
+                    relm4::spawn(async move {
+                        sender.input(Msg::Saved(service::save_config(config).await));
+                    });
+                }
+            }
+            Msg::Saved(Ok(())) => {
+                sender.input(Msg::HideSettings);
+                spawn_load(&sender, self.view.clone());
+            }
+            Msg::Saved(Err(error)) => sender.input(Msg::Failed(error)),
             Msg::ActionDone(result) => {
                 if let Err(error) = result {
                     self.banner.set_title(&escape(&error));
@@ -892,7 +919,6 @@ impl SimpleComponent for App {
                 }
                 spawn_load(&sender, self.view.clone());
             }
-            Msg::Mode(mode) => self.apply_mode(&mode),
             Msg::Key(key) => self.on_key(key),
             Msg::Compact(compact) => {
                 self.compact = compact;
