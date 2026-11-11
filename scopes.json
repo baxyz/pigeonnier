@@ -1,9 +1,6 @@
 [
   "core",
-  "cli",
-  "daemon",
   "gnome",
-  "extension",
   "packaging",
   "build",
   "test",
