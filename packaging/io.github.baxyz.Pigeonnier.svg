@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- A dovecote: a tower with a pointed roof and three nest openings. -->
+  <rect x="12" y="104" width="104" height="12" rx="6" fill="#c0bfbc"/>
+  <rect x="30" y="50" width="68" height="60" rx="6" fill="#f6f5f4"/>
+  <rect x="30" y="50" width="68" height="60" rx="6" fill="none" stroke="#deddda" stroke-width="2"/>
+  <path d="M22 54 L64 16 L106 54 Z" fill="#3584e4" stroke-linejoin="round"/>
+  <path d="M22 54 L64 16 L106 54" fill="none" stroke="#1c71d8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M44 84 a8 8 0 0 1 16 0 v6 h-16 z" fill="#3d3846"/>
+  <path d="M68 84 a8 8 0 0 1 16 0 v6 h-16 z" fill="#3d3846"/>
+  <path d="M56 66 a8 8 0 0 1 16 0 v6 h-16 z" fill="#3d3846"/>
+  <rect x="40" y="90" width="24" height="4" rx="2" fill="#9a9996"/>
+  <rect x="64" y="90" width="24" height="4" rx="2" fill="#9a9996"/>
+  <rect x="52" y="72" width="24" height="4" rx="2" fill="#9a9996"/>
+  <circle cx="64" cy="30" r="4" fill="#ffffff"/>
+</svg>

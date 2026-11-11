@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<component type="desktop-application">
+  <id>io.github.baxyz.Pigeonnier</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <name>Pigeonnier</name>
+  <summary>What is waiting for you, project by project</summary>
+  <description>
+    <p>
+      Pigeonnier gathers the pull requests waiting for you on GitHub, the items of your GitHub
+      Projects and your Todoist tasks, grouped by project rather than by service.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.baxyz.Pigeonnier.desktop</launchable>
+  <developer id="io.github.baxyz">
+    <name>baxyz</name>
+  </developer>
+  <url type="homepage">https://github.com/baxyz/pigeonnier</url>
+  <url type="bugtracker">https://github.com/baxyz/pigeonnier/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-11"/>
+  </releases>
+</component>
