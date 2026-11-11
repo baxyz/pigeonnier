@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Which notifications to send, as a pure decision: the daemon shows them and records the keys.
+//! Which notifications to send, as a pure decision: the app shows them and records the keys.
 
 use std::collections::BTreeMap;
 

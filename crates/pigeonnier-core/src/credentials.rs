@@ -22,8 +22,13 @@ pub enum CredentialError {
     Unsupported,
 }
 
+/// How long to wait for the keyring, which may be showing an unlock prompt.
+#[cfg(target_os = "linux")]
+const KEYRING_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The store runs its own async runtime, which must not start inside the caller's: a plain thread
-/// keeps these functions callable from anywhere.
+/// keeps these functions callable from anywhere. A keyring that never answers is reported rather
+/// than waited for forever.
 #[cfg(target_os = "linux")]
 fn with_entry<T: Send + 'static>(
     account: &str,
@@ -31,23 +36,33 @@ fn with_entry<T: Send + 'static>(
 ) -> Result<T, CredentialError> {
     static STORE: std::sync::Once = std::sync::Once::new();
     let account = account.to_owned();
+    let (answer, answered) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let failure = |error: keyring_core::Error| CredentialError::Keyring(error.to_string());
-        let mut setup = Ok(());
-        STORE.call_once(|| match zbus_secret_service_keyring_store::Store::new() {
-            Ok(store) => keyring_core::set_default_store(store),
-            Err(error) => setup = Err(failure(error)),
-        });
-        setup?;
-        let entry = keyring_core::Entry::new(SERVICE, &account).map_err(failure)?;
-        action(&entry).map_err(failure)
-    })
-    .join()
-    .unwrap_or_else(|_| {
-        Err(CredentialError::Keyring(
-            "the keyring thread failed".to_owned(),
-        ))
-    })
+        let run = || {
+            let failure = |error: keyring_core::Error| CredentialError::Keyring(error.to_string());
+            let mut setup = Ok(());
+            STORE.call_once(|| match zbus_secret_service_keyring_store::Store::new() {
+                Ok(store) => keyring_core::set_default_store(store),
+                Err(error) => setup = Err(failure(error)),
+            });
+            setup?;
+            let entry = keyring_core::Entry::new(SERVICE, &account).map_err(failure)?;
+            action(&entry).map_err(failure)
+        };
+        let _ = answer.send(run());
+    });
+    answered
+        .recv_timeout(KEYRING_PATIENCE)
+        .unwrap_or_else(|error| {
+            Err(CredentialError::Keyring(match error {
+                std::sync::mpsc::RecvTimeoutError::Timeout => {
+                    "the keyring did not answer".to_owned()
+                }
+                std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                    "the keyring thread failed".to_owned()
+                }
+            }))
+        })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -92,7 +107,7 @@ pub fn github_token() -> Option<String> {
     from_keyring(GITHUB).or_else(|| GithubClient::token_from_gh_cli().ok())
 }
 
-/// A token set by hand, in the environment or with `pigeonnier login`.
+/// A personal token set in the environment, for development.
 #[must_use]
 pub fn todoist_token() -> Option<String> {
     from_environment("TODOIST_TOKEN").or_else(|| from_keyring(TODOIST))
@@ -121,7 +136,7 @@ pub fn forget_todoist() -> Result<(), CredentialError> {
 }
 
 /// The token to use now, refreshed if it is about to end. Refresh tokens work once and reusing one
-/// revokes every token of the application, while the daemon and the CLI share this session: a file
+/// revokes every token of the application, and two instances can share this session: a file
 /// lock makes one of them refresh, and the other read what it stored.
 ///
 /// # Errors
