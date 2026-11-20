@@ -9,8 +9,9 @@
 # the devcontainer refuses. That works because the binary only needs GTK, libadwaita and the C
 # library, which the GNOME runtime carries in newer, compatible versions.
 #
-# The bundle lands in /workspaces/.dev/dist, which the host sees as ~/projects/baxyz/.dev/dist. Set
-# PIGEONNIER_DIST to put it elsewhere.
+# The bundle lands in /workspaces/.dev/dist (set PIGEONNIER_DIST to put it elsewhere). That folder is
+# a bind mount of the Docker host, which need not be the desktop that runs flatpak: the closing
+# message names the Docker host and the folder's path there.
 
 set -euo pipefail
 
@@ -59,6 +60,20 @@ flatpak build-finish "$work/app" --command=pigeonnier >/dev/null \
 flatpak build-export --disable-sandbox "$work/repo" "$work/app" >/dev/null
 flatpak build-bundle "$work/repo" "$dist/pigeonnier.flatpak" "$APP_ID" --runtime-repo="$FLATHUB"
 
+# Where the bundle sits on the Docker host: the mount holding $dist, read from mountinfo (its fourth
+# field is the folder's path in the host filesystem, the host path when that filesystem is the
+# host's root). Empty off Docker, e.g. on Codespaces.
+bundle="$dist/pigeonnier.flatpak"
+docker_host=$(docker info --format '{{.Name}}' 2>/dev/null || true)
+host_path=$(awk -v d="$(cd "$dist" && pwd -P)" '
+  index(d "/", $5 "/") == 1 && length($5) > best { best = length($5); path = $4 substr(d, length($5) + 1) }
+  END { print path }' /proc/self/mountinfo)
+
 echo
-echo "build-flatpak: $dist/pigeonnier.flatpak is ready. On the host:"
-echo "  flatpak install --user --reinstall -y ~/projects/baxyz/.dev/dist/pigeonnier.flatpak"
+echo "build-flatpak: $bundle is ready."
+if [[ -n $docker_host && -n $host_path && $host_path != "$dist" ]]; then
+  # flatpak maps the bundle into memory, so it cannot read it from a pipe: it needs a real file.
+  echo "It sits on $docker_host at $host_path/pigeonnier.flatpak. On the desktop:"
+  echo "  f=\$(mktemp --suffix=.flatpak) && scp $docker_host:$host_path/pigeonnier.flatpak \"\$f\" \\"
+  echo "    && flatpak install --user --reinstall -y \"\$f\"; rm -f \"\$f\""
+fi
