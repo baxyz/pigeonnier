@@ -12,6 +12,9 @@ ignore = [
   { id = "RUSTSEC-2026-0370", reason = "zvariant, through secret-service" },
   { id = "RUSTSEC-2026-0371", reason = "zbus_names, through secret-service" },
   { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, through secret-service" },
+  # Published on 2026-11-20: chrono is unmaintained, with no known flaw. Moving to jiff touches
+  # every date of the engine, so it is its own change.
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no known flaw; jiff later" },
 ]
 
 [licenses]
