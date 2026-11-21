@@ -20,6 +20,7 @@ pub enum Kind {
     ClaudeAction,
     Todo,
     Roadmap,
+    Issue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]

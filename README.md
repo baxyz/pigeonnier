@@ -39,8 +39,8 @@ The window opens on a welcome page:
    the page to paste it on.
 2. **Connecter** Todoist: the browser opens on Todoist; authorize, and that is all.
 3. Pigeonnier proposes one project per GitHub account and organization, paired with the Todoist
-   section of the same name. Open a project to change its name, its GitHub Project or its Todoist
-   section, then **Enregistrer**.
+   section of the same name. Open a project to change its name, narrow it to one repository, choose
+   its issues (mine, all or none), its GitHub Project or its Todoist section, then **Enregistrer**.
 
 The settings button in the header bar brings this page back later. Tokens stay in the system
 keyring.

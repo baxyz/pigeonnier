@@ -11,6 +11,14 @@ use super::{Provenance, RawItem, SourceError, check_status};
 const ENDPOINT: &str = "https://api.github.com/graphql";
 const SOURCE_PR: &str = "github:pull_request";
 const SOURCE_PROJECT_ITEM: &str = "github:project_item";
+const SOURCE_ISSUE: &str = "github:issue";
+
+const ISSUE_FIELDS: &str = "
+    id number title url updatedAt createdAt
+    repository { name nameWithOwner owner { login } }
+    labels(first: 20) { nodes { name } }
+    milestone { dueOn }
+    assignees(first: 10) { nodes { login } }";
 
 const PR_FIELDS: &str = "
     id number title url isDraft updatedAt createdAt reviewDecision mergeable headRefOid
@@ -80,6 +88,8 @@ pub enum ProjectRead {
 pub struct Owner {
     pub login: String,
     pub projects: Vec<OwnerProject>,
+    /// Its repositories that are not archived, as `owner/name`, most recently pushed first.
+    pub repos: Vec<String>,
 }
 
 /// A project of an owner; projects come most recently updated first.
@@ -172,11 +182,25 @@ impl GithubClient {
     /// # Errors
     /// Any HTTP or GraphQL failure, including a partial answer: a search with holes would hide work.
     pub async fn search_pull_requests(&self, search: &str) -> Result<Vec<Value>, SourceError> {
+        self.search(search, &format!("... on PullRequest {{ {PR_FIELDS} }}"))
+            .await
+    }
+
+    /// Runs one issue search and follows its pages.
+    ///
+    /// # Errors
+    /// As [`Self::search_pull_requests`].
+    pub async fn search_issues(&self, search: &str) -> Result<Vec<Value>, SourceError> {
+        self.search(search, &format!("... on Issue {{ {ISSUE_FIELDS} }}"))
+            .await
+    }
+
+    async fn search(&self, search: &str, nodes: &str) -> Result<Vec<Value>, SourceError> {
         let query = format!(
             "query($q: String!, $after: String) {{
                search(type: ISSUE, first: 100, query: $q, after: $after) {{
                  pageInfo {{ hasNextPage endCursor }}
-                 nodes {{ ... on PullRequest {{ {PR_FIELDS} }} }}
+                 nodes {{ {nodes} }}
                }}
              }}"
         );
@@ -261,11 +285,17 @@ impl GithubClient {
             "projectsV2(first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
             nodes { number title closed }
         }";
+        const REPOS: &str = "first: 100, isArchived: false,
+            orderBy: {field: PUSHED_AT, direction: DESC}";
         let query = format!(
             "query {{
                viewer {{
                  login {PROJECTS}
-                 organizations(first: 100) {{ nodes {{ login {PROJECTS} }} }}
+                 repositories(ownerAffiliations: OWNER, {REPOS}) {{ nodes {{ nameWithOwner }} }}
+                 organizations(first: 100) {{ nodes {{
+                   login {PROJECTS}
+                   repositories({REPOS}) {{ nodes {{ nameWithOwner }} }}
+                 }} }}
                }}
              }}"
         );
@@ -286,7 +316,16 @@ impl GithubClient {
 
 fn owner_from_node(node: &Value) -> Option<Owner> {
     let projects = node.pointer("/projectsV2/nodes").and_then(Value::as_array);
+    let repos = node
+        .pointer("/repositories/nodes")
+        .and_then(Value::as_array);
     Some(Owner {
+        repos: repos
+            .into_iter()
+            .flatten()
+            .filter_map(|repo| repo["nameWithOwner"].as_str())
+            .map(str::to_owned)
+            .collect(),
         login: node["login"].as_str()?.to_owned(),
         projects: projects
             .into_iter()
@@ -321,6 +360,14 @@ fn provenance(source: &'static str, node: &Value) -> Provenance {
         source,
         id: node["id"].as_str().unwrap_or_default().to_owned(),
         version: node["updatedAt"].as_str().map(str::to_owned),
+    }
+}
+
+#[must_use]
+pub fn raw_issue(node: &Value) -> RawItem {
+    RawItem {
+        provenance: provenance(SOURCE_ISSUE, node),
+        payload: node.clone(),
     }
 }
 

@@ -3,7 +3,9 @@
 //! The settings page: the accounts, and the projects, chosen among what the accounts can see. The
 //! editing rules are plain functions; the drawing is in [`App::draw_settings`].
 
-use pigeonnier_core::config::{Config, GithubLink, Project, TodoistLink, normalize_name};
+use pigeonnier_core::config::{
+    Config, GithubLink, IssueScope, Project, TodoistLink, normalize_name,
+};
 use pigeonnier_core::discover;
 use pigeonnier_core::engine::Choices;
 use pigeonnier_core::viewmodel::Snapshot;
@@ -57,6 +59,43 @@ pub fn project_options(choices: &Choices, owner: &str) -> Vec<(u32, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The repositories of an owner, as `owner/name`, most recently pushed first.
+#[must_use]
+pub fn repo_options(choices: &Choices, owner: &str) -> Vec<(String, String)> {
+    let found = if owner == ME {
+        choices.owners.first()
+    } else {
+        choices
+            .owners
+            .iter()
+            .find(|known| known.login.eq_ignore_ascii_case(owner))
+    };
+    found
+        .map(|owner| {
+            owner
+                .repos
+                .iter()
+                .map(|repo| {
+                    let name = repo.split_once('/').map_or(repo.as_str(), |(_, name)| name);
+                    (repo.clone(), name.to_owned())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What a project can list of the issues: `(value, label)`, after "Aucune".
+#[must_use]
+pub fn issue_options() -> Vec<(IssueScope, String)> {
+    vec![
+        (
+            IssueScope::Assigned,
+            "Celles qui me sont assignées".to_owned(),
+        ),
+        (IssueScope::All, "Toutes les ouvertes".to_owned()),
+    ]
 }
 
 /// Every Todoist section: `(project, section)`.
@@ -192,10 +231,21 @@ pub fn summary(config: &Config, project: &Project) -> String {
         } else {
             format!("GitHub {}", link.owner)
         };
-        parts.push(match link.project {
-            Some(number) => format!("{owner}, Project #{number}"),
-            None => owner,
+        let mut github = match link.repos.as_slice() {
+            [] => owner,
+            [repo] => format!("GitHub {repo}"),
+            repos => format!("GitHub {}", repos.join(", ")),
+        };
+        if let Some(number) = link.project {
+            github.push_str(", Project #");
+            github.push_str(&number.to_string());
+        }
+        github.push_str(match link.issues {
+            IssueScope::None => ", sans issues",
+            IssueScope::Assigned => ", mes issues",
+            IssueScope::All => ", toutes les issues",
         });
+        parts.push(github);
     }
     if let Some(link) = &project.todoist {
         parts.push(match todoist_project(config, link) {
@@ -215,6 +265,9 @@ pub fn summary(config: &Config, project: &Project) -> String {
 pub enum Edit {
     Name(String),
     Owner(Option<String>),
+    /// One repository of the owner, or `None` for all of them.
+    Repo(Option<String>),
+    Issues(Option<IssueScope>),
     GithubProject(Option<u32>),
     Section(Option<(String, String)>),
     Remove,
@@ -239,13 +292,21 @@ pub fn apply(config: &mut Config, index: usize, edit: Edit) -> bool {
         Edit::Owner(owner) => {
             let unchanged = project.github.as_ref().map(|link| &link.owner) == owner.as_ref();
             if !unchanged {
-                project.github = owner.map(|owner| GithubLink {
-                    owner,
-                    project: None,
-                    repos: Vec::new(),
-                });
+                project.github = owner.map(GithubLink::owner);
             }
             !unchanged
+        }
+        Edit::Repo(repo) => {
+            if let Some(link) = &mut project.github {
+                link.repos = repo.into_iter().collect();
+            }
+            false
+        }
+        Edit::Issues(scope) => {
+            if let Some(link) = &mut project.github {
+                link.issues = scope.unwrap_or(IssueScope::None);
+            }
+            false
         }
         Edit::GithubProject(number) => {
             if let Some(link) = &mut project.github {
@@ -408,7 +469,7 @@ impl App {
         let group = adw::PreferencesGroup::new();
         group.set_title("Projets");
         group.set_description(Some(
-            "Un projet rassemble un compte ou une org GitHub, éventuellement son GitHub Project, et une section Todoist.",
+            "Un projet rassemble un compte, une org ou un dépôt GitHub avec ses issues, éventuellement son GitHub Project, et une section Todoist.",
         ));
         self.list.append(&group);
         if !snapshot.github_connected && !snapshot.todoist_connected {
@@ -488,6 +549,62 @@ impl App {
         group
     }
 
+    /// The repository, issues and GitHub Project of a project linked to an owner.
+    fn github_rows(
+        &self,
+        expander: &adw::ExpanderRow,
+        choices: &Choices,
+        index: usize,
+        link: &GithubLink,
+    ) {
+        let mut repos = repo_options(choices, &link.owner);
+        for listed in &link.repos {
+            if !repos
+                .iter()
+                .any(|(known, _)| known.eq_ignore_ascii_case(listed))
+            {
+                repos.push((listed.clone(), listed.clone()));
+            }
+        }
+        let current = link.repos.first().and_then(|listed| {
+            repos
+                .iter()
+                .position(|(known, _)| known.eq_ignore_ascii_case(listed))
+        });
+        expander.add_row(&self.choice_row(
+            ("Dépôt", "Tous les dépôts"),
+            repos,
+            current,
+            index,
+            Edit::Repo,
+        ));
+        let issues = issue_options();
+        let current = issues.iter().position(|(scope, _)| *scope == link.issues);
+        expander.add_row(&self.choice_row(
+            ("Issues", "Aucune"),
+            issues,
+            current,
+            index,
+            Edit::Issues,
+        ));
+        let mut projects = project_options(choices, &link.owner);
+        if let Some(number) = link.project
+            && !projects.iter().any(|(known, _)| *known == number)
+        {
+            projects.push((number, format!("#{number}")));
+        }
+        let current = link
+            .project
+            .and_then(|number| projects.iter().position(|(known, _)| *known == number));
+        expander.add_row(&self.choice_row(
+            ("GitHub Project (roadmap)", "Aucun (pas de roadmap)"),
+            projects,
+            current,
+            index,
+            Edit::GithubProject,
+        ));
+    }
+
     fn project_editor(
         &self,
         draft: &Config,
@@ -541,22 +658,7 @@ impl App {
         ));
 
         if let Some(link) = &project.github {
-            let mut projects = project_options(choices, &link.owner);
-            if let Some(number) = link.project
-                && !projects.iter().any(|(known, _)| *known == number)
-            {
-                projects.push((number, format!("#{number}")));
-            }
-            let current = link
-                .project
-                .and_then(|number| projects.iter().position(|(known, _)| *known == number));
-            expander.add_row(&self.choice_row(
-                ("GitHub Project (roadmap)", "Aucun (pas de roadmap)"),
-                projects,
-                current,
-                index,
-                Edit::GithubProject,
-            ));
+            self.github_rows(&expander, choices, index, link);
         }
 
         let mut sections: Vec<((String, String), String)> = section_options(choices)
@@ -611,6 +713,7 @@ mod tests {
             owners: vec![
                 Owner {
                     login: "baxyz".to_owned(),
+                    repos: vec!["baxyz/pigeonnier".to_owned()],
                     projects: vec![OwnerProject {
                         number: 3,
                         title: "Perso".to_owned(),
@@ -618,6 +721,7 @@ mod tests {
                 },
                 Owner {
                     login: "helpers4".to_owned(),
+                    repos: vec!["helpers4/devcontainer".to_owned()],
                     projects: Vec::new(),
                 },
             ],
@@ -700,5 +804,37 @@ mod tests {
             .map(|project| project.id.as_str())
             .collect();
         assert_eq!(ids, ["projet-1", "projet-1-2"]);
+    }
+
+    #[test]
+    fn a_project_narrows_to_one_repository_and_chooses_its_issues() {
+        let mut config = Config::default();
+        config.projects.push(new_project(0));
+        apply(&mut config, 0, Edit::Owner(Some("helpers4".to_owned())));
+        assert_eq!(
+            repo_options(&choices(), "helpers4"),
+            [(
+                "helpers4/devcontainer".to_owned(),
+                "devcontainer".to_owned()
+            )]
+        );
+        apply(
+            &mut config,
+            0,
+            Edit::Repo(Some("helpers4/devcontainer".to_owned())),
+        );
+        apply(&mut config, 0, Edit::Issues(Some(IssueScope::All)));
+        let link = config.projects[0].github.as_ref().unwrap();
+        assert_eq!(link.repos, ["helpers4/devcontainer"]);
+        assert_eq!(link.issues, IssueScope::All);
+        assert_eq!(
+            summary(&config, &config.projects[0]),
+            "GitHub helpers4/devcontainer, toutes les issues"
+        );
+        apply(&mut config, 0, Edit::Repo(None));
+        apply(&mut config, 0, Edit::Issues(None));
+        let link = config.projects[0].github.as_ref().unwrap();
+        assert_eq!(link.repos, Vec::<String>::new());
+        assert_eq!(link.issues, IssueScope::None);
     }
 }

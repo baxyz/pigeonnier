@@ -45,6 +45,21 @@ static PR_MAPPING: LazyLock<Mapping> = LazyLock::new(|| {
     ])
 });
 
+static ISSUE_MAPPING: LazyLock<Mapping> = LazyLock::new(|| {
+    Mapping::new(&[
+        ("title", "/title"),
+        ("url", "/url"),
+        ("number", "/number"),
+        ("repo", "/repository/nameWithOwner"),
+        ("repo_name", "/repository/name"),
+        ("owner", "/repository/owner/login"),
+        ("due", "/milestone/dueOn"),
+        ("updated", "/updatedAt"),
+        ("labels", "/labels/nodes"),
+        ("assignees", "/assignees/nodes"),
+    ])
+});
+
 static TODOIST_MAPPING: LazyLock<Mapping> = LazyLock::new(|| {
     Mapping::new(&[
         ("id", "/id"),
@@ -252,6 +267,64 @@ pub fn pull_request(raw: &RawItem, kind: Kind, context: &Context<'_>) -> Item {
         details: None,
         provenance: record.provenance,
     }
+}
+
+/// Normalizes an open issue, or says that its project does not list it.
+#[must_use]
+pub fn github_issue(raw: &RawItem, context: &Context<'_>) -> Option<Item> {
+    let record = ISSUE_MAPPING.apply(raw);
+    let owner = record.text("owner").unwrap_or_default();
+    let repo = record.text("repo").unwrap_or_default();
+    let assigned = names(&record, "assignees", Some("login"))
+        .iter()
+        .any(|login| login.eq_ignore_ascii_case(context.me));
+    if !context
+        .config
+        .lists_issue(owner, repo, context.me, assigned)
+    {
+        return None;
+    }
+    let number = record
+        .fields
+        .get("number")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let labels = names(&record, "labels", Some("name"));
+    let urgent = labels.iter().any(|label| {
+        label.eq_ignore_ascii_case("urgent") || label.eq_ignore_ascii_case("priority:high")
+    });
+    let project = context
+        .config
+        .project_for_repo(owner, repo, context.me)
+        .map_or(OTHERS, |project| project.id.as_str());
+    Some(Item {
+        id: format!("gh-issue:{repo}#{number}"),
+        project: project.to_owned(),
+        kind: Kind::Issue,
+        title: record.text("title").unwrap_or_default().to_owned(),
+        context: format!("{}#{number}", record.text("repo_name").unwrap_or(repo)),
+        url: record.text("url").unwrap_or_default().to_owned(),
+        priority: match (urgent, assigned) {
+            (true, _) => Priority::P1,
+            (false, true) => Priority::P3,
+            (false, false) => Priority::P4,
+        },
+        due: record
+            .text("due")
+            .and_then(|text| NaiveDate::parse_from_str(text.get(..10)?, "%Y-%m-%d").ok())
+            .map(Due::Date),
+        deadline: None,
+        state: State::Planned,
+        updated_at: record
+            .text("updated")
+            .and_then(parse_time)
+            .unwrap_or_default(),
+        requested_at: None,
+        bot: false,
+        snoozed_until: None,
+        details: None,
+        provenance: record.provenance,
+    })
 }
 
 fn roadmap_priority(option: Option<&str>) -> Priority {
