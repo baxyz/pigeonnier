@@ -301,11 +301,16 @@ impl App {
     fn fill_row(&self, row: &impl IsA<adw::PreferencesRow>, item: &ItemVm) {
         let row = row.as_ref();
         row.set_title(&escape(&item.title));
-        let add_prefix = |widget: &gtk::Widget| {
+        // A plain row puts each new prefix before the others, an unfoldable one after them.
+        let add_prefixes = |widgets: &[gtk::Widget]| {
             if let Some(action) = row.downcast_ref::<adw::ActionRow>() {
-                action.add_prefix(widget);
+                for widget in widgets.iter().rev() {
+                    action.add_prefix(widget);
+                }
             } else if let Some(expander) = row.downcast_ref::<adw::ExpanderRow>() {
-                expander.add_prefix(widget);
+                for widget in widgets {
+                    expander.add_prefix(widget);
+                }
             }
         };
         let suffixes = std::cell::RefCell::new(Vec::<gtk::Widget>::new());
@@ -321,8 +326,10 @@ impl App {
                 expander.set_subtitle_lines(lines);
             }
         };
-        add_prefix(flag(item).upcast_ref());
-        add_prefix(gtk::Image::from_icon_name(&item.icon).upcast_ref());
+        add_prefixes(&[
+            flag(item).upcast(),
+            gtk::Image::from_icon_name(&item.icon).upcast(),
+        ]);
         if item.waiting {
             row.add_css_class("waiting");
         }
@@ -682,6 +689,49 @@ impl App {
         }
     }
 
+    /// The code to enter on GitHub, selectable, with a button that copies it and one that copies it
+    /// and opens the page. The dialog stays open until the person closes it.
+    fn show_github_code(&self, code: &str, url: String) {
+        let clipboard = gtk::prelude::WidgetExt::display(&self.window).clipboard();
+        let dialog = adw::AlertDialog::new(
+            Some("Connecter GitHub"),
+            Some(&escape(&format!(
+                "Entre ce code sur {url}. Pigeonnier attend ta réponse, puis se connecte tout seul."
+            ))),
+        );
+        let label = gtk::Label::new(None);
+        label.set_markup(&format!(
+            "<span size=\"xx-large\" weight=\"bold\" font_family=\"monospace\">{}</span>",
+            escape(code)
+        ));
+        label.set_selectable(true);
+        let copy = gtk::Button::with_label("Copier");
+        copy.set_halign(gtk::Align::Center);
+        copy.add_css_class("pill");
+        let (copied, text) = (clipboard.clone(), code.to_owned());
+        copy.connect_clicked(move |button| {
+            copied.set_text(&text);
+            button.set_label("Copié");
+        });
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        content.append(&label);
+        content.append(&copy);
+        dialog.set_extra_child(Some(&content));
+        dialog.add_response("close", "Fermer");
+        dialog.add_response("open", "Copier et ouvrir GitHub");
+        dialog.set_response_appearance("open", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("open"));
+        dialog.set_close_response("close");
+        let (open, text) = (self.sender.clone(), code.to_owned());
+        dialog.connect_response(Some("open"), move |_, _| {
+            clipboard.set_text(&text);
+            open.input(Msg::OpenPage(url.clone()));
+        });
+        dialog.present(Some(&self.window));
+        // A selectable label that takes the focus shows its text selected: the button takes it.
+        dialog.set_focus(Some(&copy));
+    }
+
     fn apply_mode(&self, mode: &str) {
         let (width, height) = if mode == "sidebar" {
             SIDEBAR_SIZE
@@ -1029,23 +1079,7 @@ impl SimpleComponent for App {
                     });
                 });
             }
-            Msg::GithubCode(code, url) => {
-                gtk::prelude::WidgetExt::display(&self.window)
-                    .clipboard()
-                    .set_text(&code);
-                let body =
-                    format!("Entre ce code sur la page GitHub, il est déjà copié :\n\n{code}");
-                let dialog = adw::AlertDialog::new(Some("Connecter GitHub"), Some(&body));
-                dialog.add_response("close", "Fermer");
-                dialog.add_response("open", "Ouvrir GitHub");
-                dialog.set_response_appearance("open", adw::ResponseAppearance::Suggested);
-                dialog.set_close_response("close");
-                let open = sender.clone();
-                dialog.connect_response(Some("open"), move |_, _| {
-                    open.input(Msg::OpenPage(url.clone()));
-                });
-                dialog.present(Some(&self.window));
-            }
+            Msg::GithubCode(code, url) => self.show_github_code(&code, url),
             Msg::OpenPage(url) => sender.input(Msg::Open(url)),
             Msg::Disconnect(service) => {
                 run(&sender, async move { service::disconnect(service).await });
