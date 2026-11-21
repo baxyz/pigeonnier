@@ -1,15 +1,45 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <!-- A dovecote: a tower with a pointed roof and three nest openings. -->
-  <rect x="12" y="104" width="104" height="12" rx="6" fill="#c0bfbc"/>
-  <rect x="30" y="50" width="68" height="60" rx="6" fill="#f6f5f4"/>
-  <rect x="30" y="50" width="68" height="60" rx="6" fill="none" stroke="#deddda" stroke-width="2"/>
-  <path d="M22 54 L64 16 L106 54 Z" fill="#3584e4" stroke-linejoin="round"/>
-  <path d="M22 54 L64 16 L106 54" fill="none" stroke="#1c71d8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M44 84 a8 8 0 0 1 16 0 v6 h-16 z" fill="#3d3846"/>
-  <path d="M68 84 a8 8 0 0 1 16 0 v6 h-16 z" fill="#3d3846"/>
-  <path d="M56 66 a8 8 0 0 1 16 0 v6 h-16 z" fill="#3d3846"/>
-  <rect x="40" y="90" width="24" height="4" rx="2" fill="#9a9996"/>
-  <rect x="64" y="90" width="24" height="4" rx="2" fill="#9a9996"/>
-  <rect x="52" y="72" width="24" height="4" rx="2" fill="#9a9996"/>
-  <circle cx="64" cy="30" r="4" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+  <g id="pigeon">
+    <path d="M13 22 L0 19 L2 31 Z" fill="#5e5c64"/>
+    <ellipse cx="23" cy="25" rx="15" ry="10.5" fill="#c0bfbc"/>
+    <path d="M10 21 C17 14 29 16 33 24 C26 32 15 32 10 21 Z" fill="#5e5c64"/>
+    <path d="M29 19 a7 7 0 0 0 11 -1 l-2 -5 l-8 1 z" fill="#26a269"/>
+    <circle cx="36" cy="11" r="7" fill="#c0bfbc"/>
+    <path d="M42 9 L48 12 L42 15 Z" fill="#3d3846"/>
+    <circle cx="38" cy="10" r="2" fill="#241f31"/>
+    <path d="M20 35 v5 M27 35 v5" stroke="#e66100" stroke-width="3" stroke-linecap="round"/>
+  </g>
+  </defs>
+  <!-- Pigeonholes: one compartment per project, some holding what waits, and a pigeon on top. The
+       pigeon is drawn in a few bold shapes so that it still reads at 16 px. -->
+  <g transform="translate(0 9.44) scale(1 0.92)">
+  <rect x="14" y="40" width="100" height="78" rx="10" fill="#865e3c"/>
+  <rect x="14" y="36" width="100" height="76" rx="10" fill="#b5835a"/>
+  <rect x="18" y="40" width="92" height="68" rx="7" fill="#cdab8f"/>
+  <g fill="#63452c">
+    <rect x="24" y="46" width="24" height="26" rx="4"/>
+    <rect x="52" y="46" width="24" height="26" rx="4"/>
+    <rect x="80" y="46" width="24" height="26" rx="4"/>
+    <rect x="24" y="76" width="24" height="26" rx="4"/>
+    <rect x="52" y="76" width="24" height="26" rx="4"/>
+    <rect x="80" y="76" width="24" height="26" rx="4"/>
+  </g>
+  <g fill="#3d2a1b" opacity=".6">
+    <rect x="24" y="46" width="24" height="5" rx="2"/>
+    <rect x="52" y="46" width="24" height="5" rx="2"/>
+    <rect x="80" y="46" width="24" height="5" rx="2"/>
+    <rect x="24" y="76" width="24" height="5" rx="2"/>
+    <rect x="52" y="76" width="24" height="5" rx="2"/>
+    <rect x="80" y="76" width="24" height="5" rx="2"/>
+  </g>
+  <!-- A letter, a card and a done mark. -->
+  <rect x="27" y="57" width="18" height="13" rx="2" fill="#f6f5f4"/>
+  <path d="M27.5 58 L36 64.5 L44.5 58" fill="none" stroke="#3584e4" stroke-width="2" stroke-linejoin="round"/>
+  <rect x="84" y="62" width="16" height="9" rx="2" fill="#ffa348"/>
+  <rect x="84" y="62" width="16" height="3" rx="1.5" fill="#e66100"/>
+  <circle cx="64" cy="92" r="7.5" fill="#2ec27e"/>
+  <path d="M60.5 92 l2.5 2.5 l4.5 -5" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <use xlink:href="#pigeon" transform="translate(46 -5) scale(1.35)"/>
 </svg>
