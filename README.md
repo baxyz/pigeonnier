@@ -35,7 +35,8 @@ among the applications.
 
 The window opens on a welcome page:
 
-1. **Connecter** GitHub: the window shows a code, already copied, and opens GitHub to paste it.
+1. **Connecter** GitHub: the window shows a code; **Copier et ouvrir GitHub** copies it and opens
+   the page to paste it on.
 2. **Connecter** Todoist: the browser opens on Todoist; authorize, and that is all.
 3. Pigeonnier proposes one project per GitHub account and organization, paired with the Todoist
    section of the same name. Open a project to change its name, its GitHub Project or its Todoist
