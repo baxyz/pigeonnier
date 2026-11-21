@@ -8,7 +8,7 @@ service. Local, with no server. See [docs/spec.md](docs/spec.md).
 
 | Milestone | State |
 | --- | --- |
-| M1 — It installs and connects | Built and checked in a virtual display against made-up services. Connecting GitHub waits for the app's OAuth App client ID. Never run against the real services. |
+| M1 — It installs and connects | Built and checked in a virtual display against made-up services. Never run against the real services. |
 | M2 — The list | Same. |
 | M3 — Act | Same. |
 | M4 — In the background | Not started. |

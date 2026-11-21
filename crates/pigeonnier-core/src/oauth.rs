@@ -17,7 +17,11 @@ use crate::source::{SourceError, check_status};
 const GITHUB_BASE: &str = "https://github.com";
 const GITHUB_SCOPES: &str = "repo read:org read:project";
 /// Set when an OAuth App is declared for Pigeonnier; a client id is public by nature.
-const GITHUB_CLIENT_ID: Option<&str> = option_env!("PIGEONNIER_GITHUB_CLIENT_ID");
+/// The client ID of Pigeonnier's GitHub OAuth App, which is public. A build can name another one.
+const GITHUB_CLIENT_ID: &str = match option_env!("PIGEONNIER_GITHUB_CLIENT_ID") {
+    Some(id) => id,
+    None => "Ov23liOeTWE217oH2iK1",
+};
 const TODOIST_METADATA: &str = "https://api.todoist.com/.well-known/oauth-authorization-server";
 const TODOIST_SCOPE: &str = "data:read_write";
 const CLIENT_NAME: &str = "Pigeonnier";
@@ -45,17 +49,18 @@ pub enum OauthError {
     Shape(String),
 }
 
-/// The device flow of this build, or nothing if no OAuth App is declared for it.
+/// The device flow of this build. `PIGEONNIER_GITHUB_CLIENT_ID` in the environment names another
+/// OAuth App, for development.
 #[must_use]
-pub fn github_device_flow() -> Option<GithubDeviceFlow> {
+pub fn github_device_flow() -> GithubDeviceFlow {
     let client_id = std::env::var("PIGEONNIER_GITHUB_CLIENT_ID")
         .ok()
         .filter(|id| !id.is_empty())
-        .or_else(|| GITHUB_CLIENT_ID.map(str::to_owned))?;
-    Some(match std::env::var("PIGEONNIER_GITHUB_LOGIN") {
+        .unwrap_or_else(|| GITHUB_CLIENT_ID.to_owned());
+    match std::env::var("PIGEONNIER_GITHUB_LOGIN") {
         Ok(base) => GithubDeviceFlow::with_base(client_id, base),
         Err(_) => GithubDeviceFlow::new(client_id),
-    })
+    }
 }
 
 /// What the person needs to see to authorize GitHub.
