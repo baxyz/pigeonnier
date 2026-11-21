@@ -46,8 +46,10 @@ keyring.
 
 ## Use
 
-In the window: `j`/`k` move, `x` completes, `s` snoozes to tomorrow, `r` refreshes, `a` adds a
-task, `/` searches, `1` to `9` go to a project. Narrowed down, the window becomes a sidebar.
+In the window: `j`/`k` move, `x` completes, `s` snoozes to tomorrow, `o` opens the page, `r`
+refreshes, `a` adds a task, `/` searches, `1` to `9` go to a project. A Todoist task unfolds on a
+click to show its description, its dates and labels, and its comments with their files; the arrow
+button opens it in Todoist. Narrowed down, the window becomes a sidebar.
 
 ## License
 

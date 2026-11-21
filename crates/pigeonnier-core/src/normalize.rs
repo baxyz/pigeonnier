@@ -9,7 +9,7 @@ use chrono::{DateTime, Days, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Ut
 use serde_json::Value;
 
 use crate::config::{Config, Project, Roadmap};
-use crate::item::{Due, Item, Kind, OTHERS, Priority, Reason, State};
+use crate::item::{Details, Due, Duration, Item, Kind, OTHERS, Priority, Reason, State};
 use crate::map::{Mapping, Record};
 use crate::source::RawItem;
 use crate::source::todoist::SyncState;
@@ -58,6 +58,12 @@ static TODOIST_MAPPING: LazyLock<Mapping> = LazyLock::new(|| {
         ("checked", "/checked"),
         ("updated", "/updated_at"),
         ("added", "/added_at"),
+        ("description", "/description"),
+        ("due_string", "/due/string"),
+        ("recurring", "/due/is_recurring"),
+        ("duration", "/duration/amount"),
+        ("duration_unit", "/duration/unit"),
+        ("comment_count", "/note_count"),
     ])
 });
 
@@ -243,6 +249,7 @@ pub fn pull_request(raw: &RawItem, kind: Kind, context: &Context<'_>) -> Item {
         },
         bot,
         snoozed_until: None,
+        details: None,
         provenance: record.provenance,
     }
 }
@@ -321,6 +328,7 @@ pub fn roadmap_item(raw: &RawItem, project: &Project, context: &Context<'_>) -> 
         requested_at: None,
         bot: false,
         snoozed_until: None,
+        details: None,
         provenance: record.provenance,
     })
 }
@@ -332,6 +340,34 @@ fn todoist_priority(value: Option<&Value>) -> Priority {
         Some(3) => Priority::P2,
         Some(2) => Priority::P3,
         _ => Priority::P4,
+    }
+}
+
+fn todoist_details(
+    record: &Record,
+    project: &str,
+    section: Option<&str>,
+    labels: &[String],
+) -> Details {
+    let recurring = record.fields.get("recurring") == Some(&Value::Bool(true));
+    let amount = record.fields.get("duration").and_then(Value::as_u64);
+    Details {
+        description: record.text("description").unwrap_or_default().to_owned(),
+        place: match section {
+            Some(section) => format!("{project} / {section}"),
+            None => project.to_owned(),
+        },
+        labels: labels.to_vec(),
+        recurrence: record
+            .text("due_string")
+            .filter(|_| recurring)
+            .map(str::to_owned),
+        duration: amount.map(|amount| match record.text("duration_unit") {
+            Some("day") => Duration::Days(amount),
+            _ => Duration::Minutes(amount),
+        }),
+        added_at: record.text("added").and_then(parse_time),
+        comment_count: record.fields.get("comment_count").and_then(Value::as_u64),
     }
 }
 
@@ -361,6 +397,7 @@ pub fn todoist_item(raw: &RawItem, sync: &SyncState, context: &Context<'_>) -> O
         })
         .map_or(OTHERS, |project| project.id.as_str());
     let labels = names(&record, "labels", None);
+    let details = todoist_details(&record, &todoist_project, section.as_deref(), &labels);
     let claude = labels
         .iter()
         .any(|label| label == &context.config.defaults.claude_label);
@@ -391,6 +428,7 @@ pub fn todoist_item(raw: &RawItem, sync: &SyncState, context: &Context<'_>) -> O
         requested_at: None,
         bot: false,
         snoozed_until: None,
+        details: Some(details),
         provenance: record.provenance,
     })
 }
@@ -642,7 +680,11 @@ mod tests {
             items: vec![
                 json!({ "id": "1", "content": "Do", "section_id": "s1", "project_id": "p1",
                         "priority": 4, "labels": ["claude"], "checked": false,
-                        "due": { "date": "2026-11-09" }, "deadline": { "date": "2026-11-12" },
+                        "due": { "date": "2026-11-09", "string": "every monday",
+                                 "is_recurring": true },
+                        "deadline": { "date": "2026-11-12" },
+                        "description": "**Lire** la doc", "note_count": 2,
+                        "duration": { "amount": 90, "unit": "minute" },
                         "updated_at": "2026-11-07T10:00:00Z" }),
                 json!({ "id": "2", "content": "Other", "section_id": null, "project_id": "p1",
                         "priority": 1, "labels": [], "checked": false, "due": null,
@@ -684,6 +726,34 @@ mod tests {
         assert_eq!(other.project, OTHERS);
         assert_eq!(other.kind, Kind::Todo);
         assert_eq!(other.priority, Priority::P4);
+    }
+
+    #[test]
+    fn a_todoist_task_carries_what_unfolding_it_shows() {
+        let config = config();
+        let context = Context {
+            config: &config,
+            me: "me",
+            now: now(),
+        };
+        let state = sync_state();
+        let items: Vec<Item> = state
+            .raw_items()
+            .iter()
+            .filter_map(|raw| todoist_item(raw, &state, &context))
+            .collect();
+        let details = items[0].details.as_ref().unwrap();
+        assert_eq!(details.description, "**Lire** la doc");
+        assert_eq!(details.place, "Dev / acme");
+        assert_eq!(details.labels, ["claude"]);
+        assert_eq!(details.recurrence.as_deref(), Some("every monday"));
+        assert_eq!(details.duration, Some(Duration::Minutes(90)));
+        assert_eq!(details.comment_count, Some(2));
+        let plain = items[1].details.as_ref().unwrap();
+        assert_eq!(plain.place, "Dev");
+        assert_eq!(plain.recurrence, None);
+        assert_eq!(plain.comment_count, None);
+        assert!(plain.added_at.is_some());
     }
 
     #[test]

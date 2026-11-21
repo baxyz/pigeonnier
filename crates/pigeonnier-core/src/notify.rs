@@ -266,6 +266,7 @@ mod tests {
             requested_at: None,
             bot: false,
             snoozed_until: None,
+            details: None,
             provenance: Provenance {
                 source: "test",
                 id: id.to_owned(),

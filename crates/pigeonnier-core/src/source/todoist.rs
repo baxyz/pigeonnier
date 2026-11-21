@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -27,6 +28,45 @@ pub struct SyncResponse {
     pub projects: Vec<Value>,
     #[serde(default)]
     pub labels: Vec<Value>,
+}
+
+/// A comment of a task. Todoist keeps a task's files in its comments, one at most per comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    /// Markdown, as written.
+    pub content: String,
+    pub posted_at: Option<DateTime<Utc>>,
+    pub attachment: Option<Attachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    pub name: String,
+    pub url: String,
+    pub size: Option<u64>,
+}
+
+impl Comment {
+    fn from_json(value: &Value) -> Self {
+        let attachment = value["file_attachment"].as_object().and_then(|file| {
+            let url = file.get("file_url")?.as_str()?.to_owned();
+            let name = file
+                .get("file_name")
+                .and_then(Value::as_str)
+                .unwrap_or(&url)
+                .to_owned();
+            let size = file.get("file_size").and_then(Value::as_u64);
+            Some(Attachment { name, url, size })
+        });
+        Self {
+            content: value["content"].as_str().unwrap_or_default().to_owned(),
+            posted_at: value["posted_at"]
+                .as_str()
+                .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+                .map(|time| time.with_timezone(&Utc)),
+            attachment,
+        }
+    }
 }
 
 /// A write, in the shape of a Todoist sync command.
@@ -167,6 +207,44 @@ impl TodoistClient {
             .send()
             .await?;
         Ok(check_status(response).await?.json().await?)
+    }
+
+    /// The comments of a task, oldest first, every page of them.
+    ///
+    /// # Errors
+    /// Any HTTP failure, or a body that is not a page of comments.
+    pub async fn comments(&self, task_id: &str) -> Result<Vec<Comment>, SourceError> {
+        let mut comments = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut query = vec![("task_id", task_id.to_owned()), ("limit", "200".to_owned())];
+            if let Some(cursor) = cursor.take() {
+                query.push(("cursor", cursor));
+            }
+            let response = self
+                .http
+                .get(format!("{}/api/v1/comments", self.base))
+                .bearer_auth(self.token().await?)
+                .query(&query)
+                .send()
+                .await?;
+            let page: Value = check_status(response).await?.json().await?;
+            let results = page["results"]
+                .as_array()
+                .ok_or_else(|| SourceError::Shape("no results in the comments".to_owned()))?;
+            comments.extend(
+                results
+                    .iter()
+                    .filter(|comment| comment["is_deleted"] != Value::Bool(true))
+                    .map(Comment::from_json),
+            );
+            match page["next_cursor"].as_str() {
+                Some(next) if !next.is_empty() => cursor = Some(next.to_owned()),
+                _ => break,
+            }
+        }
+        comments.sort_by_key(|comment| comment.posted_at);
+        Ok(comments)
     }
 
     /// Creates a task from natural language, parsed as in Todoist's own apps.
