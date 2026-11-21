@@ -146,9 +146,42 @@ pub struct GithubLink {
     pub owner: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<u32>,
-    /// Only these repositories, as `owner/name`.
+    /// Only these repositories, as `owner/name`. A project that lists a repository wins it over the
+    /// project of the whole owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
+    #[serde(default, skip_serializing_if = "IssueScope::is_default")]
+    pub issues: IssueScope,
+}
+
+impl GithubLink {
+    /// The whole account or organization, with the issues assigned to me.
+    #[must_use]
+    pub fn owner(owner: String) -> Self {
+        Self {
+            owner,
+            project: None,
+            repos: Vec::new(),
+            issues: IssueScope::default(),
+        }
+    }
+}
+
+/// Which open issues of its repositories a project lists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueScope {
+    None,
+    #[default]
+    Assigned,
+    All,
+}
+
+impl IssueScope {
+    #[allow(clippy::trivially_copy_pass_by_ref)] // The signature serde's `skip_serializing_if` wants.
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +297,21 @@ impl Config {
         })
     }
 
+    /// Whether the issues of a repository are listed. One that belongs to no project is listed when
+    /// it is assigned to me: it is still waiting for me.
+    #[must_use]
+    pub fn lists_issue(&self, owner: &str, repo: &str, me: &str, assigned_to_me: bool) -> bool {
+        match self
+            .project_for_repo(owner, repo, me)
+            .and_then(|project| project.github.as_ref())
+            .map(|link| link.issues)
+        {
+            Some(IssueScope::All) => true,
+            Some(IssueScope::Assigned) | None => assigned_to_me,
+            Some(IssueScope::None) => false,
+        }
+    }
+
     /// The project of a Todoist section, compared by normalized name.
     #[must_use]
     pub fn project_for_section(&self, section: &str, todoist_project: &str) -> Option<&Project> {
@@ -343,6 +391,41 @@ done_values = ["Fini"]
         let config = config();
         let text = toml::to_string_pretty(&config).unwrap();
         assert_eq!(Config::parse(&text, "again").unwrap(), config);
+    }
+
+    #[test]
+    fn a_project_lists_the_issues_it_chose() {
+        let config = Config::parse(
+            r#"
+            [[project]]
+            id = "org"
+            name = "Org"
+            github = { owner = "acme", issues = "all" }
+
+            [[project]]
+            id = "repo"
+            name = "Repo"
+            github = { owner = "acme", repos = ["acme/tool"] }
+
+            [[project]]
+            id = "quiet"
+            name = "Quiet"
+            github = { owner = "quiet", issues = "none" }
+            "#,
+            "test",
+        )
+        .unwrap();
+        let lists = |owner, repo, assigned| config.lists_issue(owner, repo, "me", assigned);
+        assert!(lists("acme", "acme/web", false));
+        assert!(!lists("acme", "acme/tool", false));
+        assert!(lists("acme", "acme/tool", true));
+        assert!(!lists("quiet", "quiet/x", true));
+        assert!(lists("nobody", "nobody/x", true));
+        assert!(!lists("nobody", "nobody/x", false));
+        // The default choice is not written back.
+        let text = config.to_toml().unwrap();
+        assert!(text.contains("issues = \"all\""));
+        assert_eq!(text.matches("issues =").count(), 2);
     }
 
     #[test]

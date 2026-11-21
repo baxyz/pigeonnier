@@ -45,8 +45,29 @@ fn search(nodes: &[Value]) -> Value {
     json!({ "data": { "search": { "pageInfo": { "hasNextPage": false }, "nodes": nodes } } })
 }
 
+fn issue(repo: &str, number: u32, assignees: &[&str]) -> Value {
+    let assignees: Vec<Value> = assignees
+        .iter()
+        .map(|login| json!({ "login": login }))
+        .collect();
+    let (owner, name) = repo.split_once('/').unwrap();
+    json!({
+        "id": format!("I_{repo}_{number}"), "number": number, "title": format!("Issue {number}"),
+        "url": format!("https://github.com/{repo}/issues/{number}"),
+        "updatedAt": "2026-11-08T10:00:00Z", "createdAt": "2026-11-08T10:00:00Z",
+        "repository": { "name": name, "nameWithOwner": repo, "owner": { "login": owner } },
+        "labels": { "nodes": [] }, "milestone": null, "assignees": { "nodes": assignees },
+    })
+}
+
 async fn github() -> MockServer {
     let server = MockServer::start().await;
+    // No issue unless a test says otherwise: its own mocks come first.
+    Mock::given(body_string_contains("is:issue"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search(&[])))
+        .with_priority(10)
+        .mount(&server)
+        .await;
     Mock::given(body_string_contains("viewer { login }"))
         .respond_with(
             ResponseTemplate::new(200)
@@ -496,4 +517,86 @@ async fn the_comments_of_a_task_are_read_page_by_page_with_their_files() {
         engine.comments("gh-pr:acme/tool#1").await,
         Err(EngineError::NotTodoist(_))
     ));
+}
+
+#[tokio::test]
+async fn issues_go_to_the_most_precise_project_and_follow_its_choice() {
+    let github = github().await;
+    Mock::given(body_string_contains("assignee:@me"))
+        .and(body_string_contains("is:issue"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search(&[issue(
+            "acme/tool",
+            7,
+            &["me"],
+        )])))
+        .mount(&github)
+        .await;
+    Mock::given(body_string_contains("user:acme"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search(&[
+            issue("acme/tool", 7, &["me"]),
+            issue("acme/tool", 8, &[]),
+            issue("acme/web", 9, &[]),
+            issue("acme/web", 10, &[]),
+        ])))
+        .mount(&github)
+        .await;
+    Mock::given(body_string_contains("projectV2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({ "data": { "repositoryOwner": { "projectV2": {
+                "id": "PVT", "title": "Roadmap", "closed": false,
+                "items": { "pageInfo": { "hasNextPage": false }, "nodes": [
+                    { "id": "PVTI_10", "isArchived": false, "updatedAt": "2026-11-08T10:00:00Z",
+                      "content": { "__typename": "Issue", "title": "Issue 10", "state": "OPEN",
+                                   "number": 10, "repository": { "name": "web" },
+                                   "url": "https://github.com/acme/web/issues/10",
+                                   "assignees": { "nodes": [] } },
+                      "fieldValues": { "nodes": [] } },
+                ] },
+            } } } }),
+        ))
+        .with_priority(1)
+        .mount(&github)
+        .await;
+    let mut engine = engine(Some(&github), None);
+    engine.set_config(
+        Config::parse(
+            r#"
+            [[project]]
+            id = "acme"
+            name = "Acme"
+            github = { owner = "acme", project = 1, issues = "all" }
+
+            [[project]]
+            id = "tool"
+            name = "Tool"
+            github = { owner = "acme", repos = ["acme/tool"] }
+            "#,
+            "test",
+        )
+        .unwrap(),
+    );
+
+    engine.refresh().await.unwrap();
+
+    let items = engine.items(now()).unwrap();
+    let issues = |project: &str| {
+        let mut ids: Vec<&str> = items
+            .iter()
+            .filter(|item| item.project == project && item.id.starts_with("gh-issue:"))
+            .map(|item| item.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+    // The repository's own project takes its issues, and lists only mine; the organization's
+    // lists all the others, except the one already on its roadmap.
+    assert_eq!(issues("tool"), ["gh-issue:acme/tool#7"]);
+    assert_eq!(issues("acme"), ["gh-issue:acme/web#9"]);
+    assert!(items.iter().any(|item| item.id == "gh-pv2:PVTI_10"));
+    assert!(
+        items
+            .iter()
+            .filter(|item| item.id.starts_with("gh-pr:acme/tool"))
+            .all(|item| item.project == "tool")
+    );
 }
