@@ -90,6 +90,29 @@ impl Due {
     }
 }
 
+/// How long a task is meant to take, in the unit the service keeps it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Duration {
+    Minutes(u64),
+    Days(u64),
+}
+
+/// What a task says beyond its title, shown when it is unfolded. Only Todoist tasks have it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Details {
+    /// Markdown, as written in the service.
+    pub description: String,
+    /// "Projet / Section", where the task lives in the service.
+    pub place: String,
+    pub labels: Vec<String>,
+    /// The date as typed, for a recurring task: "every monday".
+    pub recurrence: Option<String>,
+    pub duration: Option<Duration>,
+    pub added_at: Option<DateTime<Utc>>,
+    /// `None` when the service does not say: the comments are then read to find out.
+    pub comment_count: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Item {
     /// `gh-pr:helpers4/devcontainer#42`, `td:8812345`, `gh-pv2:PVTI_…`
@@ -108,6 +131,7 @@ pub struct Item {
     pub requested_at: Option<DateTime<Utc>>,
     pub bot: bool,
     pub snoozed_until: Option<DateTime<Utc>>,
+    pub details: Option<Details>,
     pub provenance: Provenance,
 }
 

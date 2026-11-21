@@ -12,6 +12,7 @@ publish.workspace = true
 [dependencies]
 chrono.workspace = true
 pigeonnier-core.workspace = true
+pulldown-cmark = { version = "0.13.6", default-features = false }
 relm4.workspace = true
 tokio.workspace = true
 

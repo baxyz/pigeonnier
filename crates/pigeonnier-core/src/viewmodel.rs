@@ -9,7 +9,8 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::item::{Due, Item, Kind, OTHERS, Priority, Reason, State};
+use crate::item::{Details, Due, Duration, Item, Kind, OTHERS, Priority, Reason, State};
+use crate::source::todoist::Comment;
 use crate::view::View;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +88,38 @@ pub struct ItemVm {
     pub waiting: bool,
     pub action_required: bool,
     pub actions: Vec<String>,
+    /// What unfolding the item shows; `None` for an item that only opens its page.
+    pub details: Option<DetailsVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetailsVm {
+    /// Markdown, for the UI to render.
+    pub description: String,
+    pub facts: Vec<Fact>,
+    /// Whether there are comments to read; `None` when the service did not say.
+    pub has_comments: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fact {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentVm {
+    pub posted: Option<String>,
+    /// Markdown, for the UI to render.
+    pub text: String,
+    pub attachment: Option<AttachmentVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentVm {
+    pub name: String,
+    pub url: String,
+    pub size: Option<String>,
 }
 
 const WEEKDAYS: [&str; 7] = ["lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim."];
@@ -117,6 +150,107 @@ fn due_text(due: Due, now: DateTime<FixedOffset>) -> String {
             format!("{date} {:02}:{:02}", local.hour(), local.minute())
         }
     }
+}
+
+fn full_date(date: NaiveDate) -> String {
+    format!(
+        "{} {} {} {}",
+        WEEKDAYS[date.weekday().num_days_from_monday() as usize],
+        date.day(),
+        MONTHS[date.month0() as usize],
+        date.year()
+    )
+}
+
+fn full_time(time: DateTime<Utc>, offset: FixedOffset) -> String {
+    let local = time.with_timezone(&offset);
+    format!(
+        "{} à {:02}:{:02}",
+        full_date(local.date_naive()),
+        local.hour(),
+        local.minute()
+    )
+}
+
+fn duration_text(duration: Duration) -> String {
+    match duration {
+        Duration::Days(1) => "1 jour".to_owned(),
+        Duration::Days(days) => format!("{days} jours"),
+        Duration::Minutes(minutes) if minutes < 60 => format!("{minutes} min"),
+        Duration::Minutes(minutes) if minutes % 60 == 0 => format!("{} h", minutes / 60),
+        Duration::Minutes(minutes) => format!("{} h {:02}", minutes / 60, minutes % 60),
+    }
+}
+
+fn size_text(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)] // A size shown with one decimal.
+    let size = bytes as f64;
+    match bytes {
+        0..1_000 => format!("{bytes} o"),
+        1_000..1_000_000 => format!("{:.0} ko", size / 1e3),
+        1_000_000..1_000_000_000 => format!("{:.1} Mo", size / 1e6),
+        _ => format!("{:.1} Go", size / 1e9),
+    }
+}
+
+fn details_vm(item: &Item, details: &Details, offset: FixedOffset) -> DetailsVm {
+    let mut facts = Vec::new();
+    let mut fact = |label: &str, value: String| {
+        if !value.is_empty() {
+            facts.push(Fact {
+                label: label.to_owned(),
+                value,
+            });
+        }
+    };
+    fact("Où", details.place.clone());
+    if let Some(due) = item.due {
+        fact(
+            "Prévue",
+            match due {
+                Due::Date(date) => full_date(date),
+                Due::DateTime(time) => full_time(time, offset),
+            },
+        );
+    }
+    if let Some(recurrence) = &details.recurrence {
+        fact("Récurrence", recurrence.clone());
+    }
+    if let Some(deadline) = item.deadline {
+        fact("Échéance", full_date(deadline));
+    }
+    if let Some(duration) = details.duration {
+        fact("Durée", duration_text(duration));
+    }
+    fact("Étiquettes", details.labels.join(", "));
+    if let Some(added) = details.added_at {
+        fact("Créée", full_time(added, offset));
+    }
+    if item.updated_at != DateTime::<Utc>::default() && Some(item.updated_at) != details.added_at {
+        fact("Modifiée", full_time(item.updated_at, offset));
+    }
+    DetailsVm {
+        description: details.description.clone(),
+        facts,
+        has_comments: details.comment_count.map(|count| count > 0),
+    }
+}
+
+/// What an unfolded task shows of its comments.
+#[must_use]
+pub fn comments_vm(comments: &[Comment], now: DateTime<FixedOffset>) -> Vec<CommentVm> {
+    comments
+        .iter()
+        .map(|comment| CommentVm {
+            posted: comment.posted_at.map(|time| full_time(time, *now.offset())),
+            text: comment.content.clone(),
+            attachment: comment.attachment.as_ref().map(|file| AttachmentVm {
+                name: file.name.clone(),
+                url: file.url.clone(),
+                size: file.size.map(size_text),
+            }),
+        })
+        .collect()
 }
 
 fn due_label(item: &Item, now: DateTime<FixedOffset>) -> Option<String> {
@@ -207,6 +341,10 @@ fn item_vm(item: &Item, now: DateTime<FixedOffset>) -> ItemVm {
         waiting: item.state == State::Waiting,
         action_required: matches!(item.state, State::ActionRequired(_)),
         actions,
+        details: item
+            .details
+            .as_ref()
+            .map(|details| details_vm(item, details, *now.offset())),
     }
 }
 
@@ -365,6 +503,7 @@ mod tests {
             requested_at: None,
             bot: false,
             snoozed_until: None,
+            details: None,
             provenance: Provenance {
                 source: "test",
                 id: id.to_owned(),
@@ -559,5 +698,54 @@ mod tests {
         let snapshot = snapshot(&[item("1", "a")], "all");
         let text = serde_json::to_string(&snapshot).unwrap();
         assert_eq!(serde_json::from_str::<Snapshot>(&text).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn unfolded_details_are_spelled_out() {
+        use crate::item::Duration;
+        let mut task = item("td:1", "a");
+        task.due = Some(Due::Date(date("2026-11-10")));
+        task.updated_at = DateTime::parse_from_rfc3339("2026-11-07T09:05:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        task.details = Some(Details {
+            description: "x".to_owned(),
+            place: "Dev / acme".to_owned(),
+            labels: vec!["a".to_owned(), "b".to_owned()],
+            recurrence: Some("every tuesday".to_owned()),
+            duration: Some(Duration::Minutes(90)),
+            added_at: None,
+            comment_count: Some(0),
+        });
+        let vm = item_vm(&task, now()).details.unwrap();
+        let facts: Vec<(&str, &str)> = vm
+            .facts
+            .iter()
+            .map(|fact| (fact.label.as_str(), fact.value.as_str()))
+            .collect();
+        assert_eq!(
+            facts,
+            [
+                ("Où", "Dev / acme"),
+                ("Prévue", "mar. 10 nov. 2026"),
+                ("Récurrence", "every tuesday"),
+                ("Durée", "1 h 30"),
+                ("Étiquettes", "a, b"),
+                ("Modifiée", "sam. 7 nov. 2026 à 10:05"),
+            ]
+        );
+        assert_eq!(vm.has_comments, Some(false));
+        assert!(item_vm(&item("gh-pr:x", "a"), now()).details.is_none());
+    }
+
+    #[test]
+    fn durations_and_sizes() {
+        use crate::item::Duration;
+        assert_eq!(duration_text(Duration::Minutes(45)), "45 min");
+        assert_eq!(duration_text(Duration::Minutes(120)), "2 h");
+        assert_eq!(duration_text(Duration::Days(1)), "1 jour");
+        assert_eq!(size_text(512), "512 o");
+        assert_eq!(size_text(48_000), "48 ko");
+        assert_eq!(size_text(2_500_000), "2.5 Mo");
     }
 }

@@ -14,7 +14,7 @@ use pigeonnier_core::credentials;
 use pigeonnier_core::engine::{Choices, Engine, connect, github_client, todoist_session_client};
 use pigeonnier_core::oauth::{CALLBACK_PORT, github_device_flow, start_todoist_login};
 use pigeonnier_core::paths;
-use pigeonnier_core::viewmodel::Snapshot;
+use pigeonnier_core::viewmodel::{CommentVm, Snapshot, comments_vm};
 use pigeonnier_core::when::parse_until;
 use tokio::sync::{Notify, RwLock};
 
@@ -181,6 +181,18 @@ pub async fn merge(item_id: &str) -> Result<(), String> {
     let result = service.engine.read().await.merge(item_id, now()).await;
     service.refresh.notify_one();
     result.map_err(readable)
+}
+
+/// The comments of a task, read from Todoist each time the task is unfolded.
+pub async fn comments(item_id: &str) -> Result<Vec<CommentVm>, String> {
+    let comments = service()?
+        .engine
+        .read()
+        .await
+        .comments(item_id)
+        .await
+        .map_err(readable)?;
+    Ok(comments_vm(&comments, now()))
 }
 
 /// Adds a task in natural language. No project means the Todoist inbox.
