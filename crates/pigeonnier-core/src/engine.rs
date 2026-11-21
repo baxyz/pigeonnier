@@ -11,12 +11,15 @@ use serde_json::Value;
 
 use crate::cache::{Cache, CacheError};
 use crate::config::Config;
+use crate::config::IssueScope;
 use crate::discover;
 use crate::item::{Item, Kind, Priority, Reason, State};
-use crate::normalize::{Context, pull_request, roadmap_item, todoist_item};
+use crate::normalize::{Context, github_issue, pull_request, roadmap_item, todoist_item};
 use crate::notify;
 use crate::source::SourceError;
-use crate::source::github::{GithubClient, Owner, ProjectRead, raw_project_item, raw_pull_request};
+use crate::source::github::{
+    GithubClient, Owner, ProjectRead, raw_issue, raw_project_item, raw_pull_request,
+};
 use crate::source::todoist::{Comment, SyncState, TodoistClient, TodoistCommand};
 use crate::view::{View, default_views};
 use crate::viewmodel::{self, Issue, Snapshot};
@@ -54,6 +57,9 @@ struct PrCache {
     reviews: Vec<Value>,
     mine: Vec<Value>,
     assigned: Vec<Value>,
+    /// Open issues: mine everywhere, and every one of the projects that list them all.
+    #[serde(default)]
+    issues: Vec<Value>,
 }
 
 /// A manual action to create in a project's Todoist section.
@@ -241,16 +247,55 @@ impl Engine {
         } else {
             Vec::new()
         };
+        let issues = self.search_issues(github, &me).await?;
         let cache = PrCache {
             me: me.clone(),
             reviews,
             mine,
             assigned,
+            issues,
         };
         self.cache
             .put(KEY_PRS, &cache)
             .map_err(|error| SourceError::Shape(error.to_string()))?;
         Ok(me)
+    }
+
+    /// The issues assigned to me, then those of each project that lists them all, each once.
+    async fn search_issues(
+        &self,
+        github: &GithubClient,
+        me: &str,
+    ) -> Result<Vec<Value>, SourceError> {
+        let base = "is:issue is:open archived:false";
+        let mut searches = vec![format!("{base} assignee:@me")];
+        for link in self.config.projects.iter().filter_map(|project| {
+            project
+                .github
+                .as_ref()
+                .filter(|link| link.issues == IssueScope::All)
+        }) {
+            let scope: Vec<String> = if link.repos.is_empty() {
+                let owner = if link.owner == "@me" { me } else { &link.owner };
+                vec![format!("user:{owner}")]
+            } else {
+                link.repos
+                    .iter()
+                    .map(|repo| format!("repo:{repo}"))
+                    .collect()
+            };
+            searches.push(format!("{base} {}", scope.join(" ")));
+        }
+        let mut seen = HashSet::new();
+        let mut issues = Vec::new();
+        for search in searches {
+            for node in github.search_issues(&search).await? {
+                if seen.insert(node["id"].as_str().unwrap_or_default().to_owned()) {
+                    issues.push(node);
+                }
+            }
+        }
+        Ok(issues)
     }
 
     async fn refresh_roadmaps(
@@ -340,6 +385,18 @@ impl Engine {
                     .filter_map(|node| roadmap_item(&raw_project_item(node), project, &context)),
             );
         }
+        // An issue already on the project's roadmap is listed once, as a roadmap item.
+        let on_roadmaps: HashSet<(String, String)> = items
+            .iter()
+            .filter(|item| item.kind == Kind::Roadmap && !item.url.is_empty())
+            .map(|item| (item.project.clone(), item.url.clone()))
+            .collect();
+        items.extend(
+            prs.issues
+                .iter()
+                .filter_map(|node| github_issue(&raw_issue(node), &context))
+                .filter(|item| !on_roadmaps.contains(&(item.project.clone(), item.url.clone()))),
+        );
         let sync: SyncState = self.cache.get(KEY_TODOIST)?.unwrap_or_default();
         items.extend(
             sync.raw_items()

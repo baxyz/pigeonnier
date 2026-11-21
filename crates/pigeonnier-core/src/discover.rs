@@ -44,7 +44,7 @@ pub fn propose(owners: &[Owner], sections: &[String], parent: Option<&str>) -> C
                     owner.login.clone()
                 },
                 project: owner.projects.first().map(|project| project.number),
-                repos: Vec::new(),
+                ..GithubLink::owner(String::new())
             }),
             todoist: section.map(|section| TodoistLink {
                 section: section.clone(),
@@ -127,6 +127,7 @@ mod tests {
     fn owner(login: &str, projects: &[u32]) -> Owner {
         Owner {
             login: login.to_owned(),
+            repos: Vec::new(),
             projects: projects
                 .iter()
                 .map(|number| OwnerProject {

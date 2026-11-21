@@ -307,6 +307,7 @@ fn kind_name(kind: Kind) -> (&'static str, &'static str) {
         Kind::ClaudeAction => ("claude", "dialog-information-symbolic"),
         Kind::Todo => ("todo", "object-select-symbolic"),
         Kind::Roadmap => ("roadmap", "x-office-calendar-symbolic"),
+        Kind::Issue => ("issue", "emblem-important-symbolic"),
     }
 }
 

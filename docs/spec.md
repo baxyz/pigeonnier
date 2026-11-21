@@ -15,9 +15,13 @@ It gathers, for each project:
 - **Tasks** (Todoist): the tasks of the project's section, including the manual actions Claude
   asked for (label `claude`).
 - **Roadmap** (GitHub Projects): the open items of the project's GitHub Project.
+- **Issues** (GitHub): the open issues of the project's repositories, either those assigned to me
+  (the default), all of them, or none. An issue already on the project's roadmap is listed once.
 
-A **project** is a GitHub account or organization, optionally one of its GitHub Projects, and
-optionally one Todoist section. The app proposes projects on the first run and lets every one of
+A **project** is a GitHub account or organization, or one of its repositories, optionally one of
+its GitHub Projects, and optionally one Todoist section. A project made of one repository takes
+that repository's pull requests and issues away from the project of its owner. An issue assigned
+to me that no project lists goes to "Autres". The app proposes projects on the first run and lets every one of
 them be fixed by hand.
 
 ## Principles
@@ -73,11 +77,12 @@ carries the client ID of its GitHub OAuth App. Nothing has run against the real 
 | --- | --- | --- |
 | Reviews | GraphQL search `is:pr is:open archived:false review-requested:@me` | Optionally `user-review-requested:@me` for direct requests only |
 | My pull requests | GraphQL search `is:pr is:open archived:false author:@me` | Optionally the ones assigned to me |
+| Issues | GraphQL search `is:issue is:open archived:false assignee:@me`, then `user:<owner>` or `repo:<repo>` for each project that lists all its issues | |
 | Roadmap | `repositoryOwner(login:) { ... on ProjectV2Owner { projectV2(number:) } }`, 100 items a page | `null` without an error means the token cannot read it |
 | Todoist | `POST /api/v1/sync` with the last `sync_token` | One call per refresh after the first |
 
-The number of calls does not depend on the number of repositories: the owner of each pull request
-decides its project.
+The number of calls does not depend on the number of repositories: the repository of each pull
+request or issue decides its project.
 
 ### State of my pull requests, most urgent first
 
