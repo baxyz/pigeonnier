@@ -3,12 +3,15 @@
 //! Draws what the engine prepares and sends actions back. The narrow layout is the sidebar: it is a
 //! breakpoint of this one window, not a second window to maintain.
 
+mod markdown;
 mod service;
 mod settings;
 
+use std::collections::{HashMap, HashSet};
+
 use pigeonnier_core::config::Config;
 use pigeonnier_core::engine::Choices;
-use pigeonnier_core::viewmodel::{ItemVm, ProjectVm, Snapshot};
+use pigeonnier_core::viewmodel::{CommentVm, DetailsVm, ItemVm, ProjectVm, Snapshot};
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, RelmApp, SimpleComponent, adw, gtk};
 
@@ -26,6 +29,10 @@ enum Msg {
     SetView(String),
     SelectProject(Option<String>),
     Open(String),
+    /// A task was unfolded; `true` when it has comments to read.
+    Unfold(String, bool),
+    Fold(String),
+    Comments(String, Result<Vec<CommentVm>, String>),
     Complete(String),
     Snooze(String, &'static str),
     ActionDone(Result<(), String>),
@@ -78,8 +85,13 @@ struct App {
     view: String,
     project: Option<String>,
     snapshot: Option<Snapshot>,
-    rows: Vec<(adw::ActionRow, ItemVm)>,
+    rows: Vec<(adw::PreferencesRow, ItemVm)>,
     focused: Option<usize>,
+    /// The tasks unfolded, kept unfolded when the list is drawn again.
+    unfolded: HashSet<String>,
+    /// The comments read for each unfolded task, and where to show them.
+    comments: HashMap<String, Result<Vec<CommentVm>, String>>,
+    comment_boxes: HashMap<String, gtk::Box>,
     sender: ComponentSender<App>,
 }
 
@@ -142,14 +154,175 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     button
 }
 
+fn text_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    label
+}
+
+fn markdown_label(markdown: &str) -> gtk::Label {
+    let label = text_label("");
+    label.set_markup(&markdown::to_pango(markdown));
+    label.set_selectable(true);
+    label
+}
+
+/// Shows comments, or that they are being read (`Err` with no message), or why they could not be.
+fn fill_comments(target: &gtk::Box, comments: &Result<Vec<CommentVm>, String>) {
+    while let Some(child) = target.first_child() {
+        target.remove(&child);
+    }
+    let note = |text: &str| {
+        let label = text_label(text);
+        label.add_css_class("dim-label");
+        target.append(&label);
+    };
+    match comments {
+        Err(error) if error.is_empty() => note("Lecture des commentaires…"),
+        Err(error) => note(&format!("Les commentaires n'ont pas pu être lus : {error}")),
+        Ok(comments) if comments.is_empty() => note("Aucun commentaire"),
+        Ok(comments) => {
+            for comment in comments {
+                let block = gtk::Box::new(gtk::Orientation::Vertical, 4);
+                if let Some(posted) = &comment.posted {
+                    let when = text_label(posted);
+                    when.add_css_class("caption");
+                    when.add_css_class("dim-label");
+                    block.append(&when);
+                }
+                if !comment.text.trim().is_empty() {
+                    block.append(&markdown_label(&comment.text));
+                }
+                if let Some(file) = &comment.attachment {
+                    let text = match &file.size {
+                        Some(size) => format!("📎 {} ({size})", file.name),
+                        None => format!("📎 {}", file.name),
+                    };
+                    let link = gtk::LinkButton::with_label(&file.url, &text);
+                    link.set_halign(gtk::Align::Start);
+                    block.append(&link);
+                }
+                block.add_css_class("comment");
+                target.append(&block);
+            }
+        }
+    }
+}
+
 impl App {
-    fn item_row(&mut self, item: &ItemVm) -> adw::ActionRow {
-        let row = adw::ActionRow::new();
+    /// A row that unfolds when the item has details, and opens its page otherwise.
+    fn item_row(&mut self, item: &ItemVm) -> adw::PreferencesRow {
+        let Some(details) = &item.details else {
+            let row = adw::ActionRow::new();
+            row.set_activatable(true);
+            self.fill_row(&row, item);
+            let (sender, url) = (self.sender.clone(), item.url.clone());
+            row.connect_activated(move |_| sender.input(Msg::Open(url.clone())));
+            self.rows.push((row.clone().upcast(), item.clone()));
+            return row.upcast();
+        };
+        let row = adw::ExpanderRow::new();
+        // An unfoldable row puts each new suffix before the others: the last one comes first.
+        let open = icon_button("adw-external-link-symbolic", "Ouvrir dans Todoist");
+        let (sender, url) = (self.sender.clone(), item.url.clone());
+        open.connect_clicked(move |_| sender.input(Msg::Open(url.clone())));
+        row.add_suffix(&open);
+        self.fill_row(&row, item);
+        row.add_row(&self.details_row(item, details));
+        if self.unfolded.contains(&item.id) {
+            row.set_expanded(true);
+        }
+        let (sender, id) = (self.sender.clone(), item.id.clone());
+        let fetch = details.has_comments != Some(false);
+        row.connect_expanded_notify(move |row| {
+            sender.input(if row.is_expanded() {
+                Msg::Unfold(id.clone(), fetch)
+            } else {
+                Msg::Fold(id.clone())
+            });
+        });
+        self.rows.push((row.clone().upcast(), item.clone()));
+        row.upcast()
+    }
+
+    /// What an unfolded task shows: its description, its facts and its comments.
+    fn details_row(&mut self, item: &ItemVm, details: &DetailsVm) -> gtk::ListBoxRow {
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+        if details.description.trim().is_empty() {
+            let none = text_label("Pas de description");
+            none.add_css_class("dim-label");
+            content.append(&none);
+        } else {
+            content.append(&markdown_label(&details.description));
+        }
+        if !details.facts.is_empty() {
+            let grid = gtk::Grid::new();
+            grid.set_column_spacing(12);
+            grid.set_row_spacing(4);
+            for (line, fact) in (0..).zip(&details.facts) {
+                let name = text_label(&fact.label);
+                name.add_css_class("dim-label");
+                name.set_valign(gtk::Align::Start);
+                let value = text_label(&fact.value);
+                value.set_selectable(true);
+                value.set_hexpand(true);
+                grid.attach(&name, 0, line, 1, 1);
+                grid.attach(&value, 1, line, 1, 1);
+            }
+            content.append(&grid);
+        }
+        let heading = text_label("Commentaires");
+        heading.add_css_class("heading");
+        content.append(&heading);
+        let comments = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        content.append(&comments);
+        if details.has_comments == Some(false) {
+            fill_comments(&comments, &Ok(Vec::new()));
+        } else if let Some(known) = self.comments.get(&item.id) {
+            fill_comments(&comments, known);
+        } else {
+            fill_comments(&comments, &Err(String::new()));
+        }
+        self.comment_boxes.insert(item.id.clone(), comments);
+        let row = gtk::ListBoxRow::new();
+        row.set_activatable(false);
+        row.set_selectable(false);
+        row.set_child(Some(&content));
+        row
+    }
+
+    /// The title, subtitle, badges and buttons both kinds of rows share.
+    fn fill_row(&self, row: &impl IsA<adw::PreferencesRow>, item: &ItemVm) {
+        let row = row.as_ref();
         row.set_title(&escape(&item.title));
-        row.set_title_lines(2);
-        row.set_activatable(true);
-        row.add_prefix(&flag(item));
-        row.add_prefix(&gtk::Image::from_icon_name(&item.icon));
+        let add_prefix = |widget: &gtk::Widget| {
+            if let Some(action) = row.downcast_ref::<adw::ActionRow>() {
+                action.add_prefix(widget);
+            } else if let Some(expander) = row.downcast_ref::<adw::ExpanderRow>() {
+                expander.add_prefix(widget);
+            }
+        };
+        let suffixes = std::cell::RefCell::new(Vec::<gtk::Widget>::new());
+        let add_suffix = |widget: &gtk::Widget| suffixes.borrow_mut().push(widget.clone());
+        let set_subtitle = |text: &str, lines: i32| {
+            if let Some(action) = row.downcast_ref::<adw::ActionRow>() {
+                action.set_subtitle(text);
+                action.set_title_lines(2);
+                action.set_subtitle_lines(lines);
+            } else if let Some(expander) = row.downcast_ref::<adw::ExpanderRow>() {
+                expander.set_subtitle(text);
+                expander.set_title_lines(2);
+                expander.set_subtitle_lines(lines);
+            }
+        };
+        add_prefix(flag(item).upcast_ref());
+        add_prefix(gtk::Image::from_icon_name(&item.icon).upcast_ref());
         if item.waiting {
             row.add_css_class("waiting");
         }
@@ -165,10 +338,9 @@ impl App {
                 .map(String::as_str)
                 .filter(|text| !text.is_empty())
                 .collect();
-            row.set_subtitle(&escape(&parts.join(" · ")));
-            row.set_subtitle_lines(2);
+            set_subtitle(&escape(&parts.join(" · ")), 2);
         } else {
-            row.set_subtitle(&escape(&item.context));
+            set_subtitle(&escape(&item.context), 0);
             if let Some(text) = &item.state_label {
                 let badge = gtk::Label::new(Some(text));
                 badge.add_css_class("state-badge");
@@ -176,16 +348,16 @@ impl App {
                 if item.action_required {
                     badge.add_css_class("accent");
                 }
-                row.add_suffix(&badge);
+                add_suffix(badge.upcast_ref());
             }
             if let Some(label) = due(item) {
-                row.add_suffix(&label);
+                add_suffix(label.upcast_ref());
             }
             if item.actions.iter().any(|action| action == "snooze") {
                 let button = icon_button("alarm-symbolic", "Reporter à demain");
                 let (sender, id) = (self.sender.clone(), item.id.clone());
                 button.connect_clicked(move |_| sender.input(Msg::Snooze(id.clone(), "tomorrow")));
-                row.add_suffix(&button);
+                add_suffix(button.upcast_ref());
             }
         }
         if item.actions.iter().any(|action| action == "merge") {
@@ -194,18 +366,25 @@ impl App {
             button.set_valign(gtk::Align::Center);
             let (sender, id, title) = (self.sender.clone(), item.id.clone(), item.title.clone());
             button.connect_clicked(move |_| sender.input(Msg::AskMerge(id.clone(), title.clone())));
-            row.add_suffix(&button);
+            add_suffix(button.upcast_ref());
         }
         if item.actions.iter().any(|action| action == "complete") {
             let button = icon_button("object-select-symbolic", "Marquer comme fait");
             let (sender, id) = (self.sender.clone(), item.id.clone());
             button.connect_clicked(move |_| sender.input(Msg::Complete(id.clone())));
-            row.add_suffix(&button);
+            add_suffix(button.upcast_ref());
         }
-        let (sender, url) = (self.sender.clone(), item.url.clone());
-        row.connect_activated(move |_| sender.input(Msg::Open(url.clone())));
-        self.rows.push((row.clone(), item.clone()));
-        row
+        let suffixes = suffixes.into_inner();
+        if let Some(action) = row.downcast_ref::<adw::ActionRow>() {
+            for widget in &suffixes {
+                action.add_suffix(widget);
+            }
+        } else if let Some(expander) = row.downcast_ref::<adw::ExpanderRow>() {
+            suffixes
+                .iter()
+                .rev()
+                .for_each(|widget| expander.add_suffix(widget));
+        }
     }
 
     fn project_group(&mut self, project: &ProjectVm) -> adw::PreferencesGroup {
@@ -248,6 +427,7 @@ impl App {
             self.list.remove(&child);
         }
         self.rows.clear();
+        self.comment_boxes.clear();
         self.focused = None;
         let Some(mut snapshot) = self.snapshot.clone() else {
             return;
@@ -439,7 +619,10 @@ impl App {
 
     fn focus_row(&mut self, index: usize) {
         if let Some((row, _)) = self.rows.get(index) {
-            row.grab_focus();
+            // An unfoldable row takes the focus on its header, inside it.
+            if !row.grab_focus() {
+                row.child_focus(gtk::DirectionType::TabForward);
+            }
             self.focused = Some(index);
         }
     }
@@ -451,7 +634,7 @@ impl App {
         let current = self
             .rows
             .iter()
-            .position(|(row, _)| row.has_focus())
+            .position(|(row, _)| row.has_focus() || row.focus_child().is_some())
             .or(self.focused);
         let item = current
             .and_then(|index| self.rows.get(index))
@@ -460,6 +643,11 @@ impl App {
             'j' => self.focus_row(current.map_or(0, |index| index + 1)),
             'k' => self.focus_row(current.map_or(0, |index| index.saturating_sub(1))),
             'r' => self.sender.input(Msg::Refresh),
+            'o' => {
+                if let Some(item) = item {
+                    self.sender.input(Msg::Open(item.url));
+                }
+            }
             'a' => {
                 self.quick.grab_focus();
             }
@@ -691,6 +879,9 @@ impl SimpleComponent for App {
             snapshot: None,
             rows: Vec::new(),
             focused: None,
+            unfolded: HashSet::new(),
+            comments: HashMap::new(),
+            comment_boxes: HashMap::new(),
             sender: sender.clone(),
         };
         model.apply_mode(&mode);
@@ -745,6 +936,31 @@ impl SimpleComponent for App {
                         }
                     },
                 );
+            }
+            Msg::Unfold(id, fetch) => {
+                self.unfolded.insert(id.clone());
+                if fetch {
+                    if let Some(target) = self.comment_boxes.get(&id) {
+                        fill_comments(target, &Err(String::new()));
+                    }
+                    let sender = sender.clone();
+                    relm4::spawn(async move {
+                        let comments = service::comments(&id).await;
+                        sender.input(Msg::Comments(id, comments));
+                    });
+                }
+            }
+            Msg::Fold(id) => {
+                self.unfolded.remove(&id);
+                self.comments.remove(&id);
+            }
+            Msg::Comments(id, comments) => {
+                if self.unfolded.contains(&id) {
+                    if let Some(target) = self.comment_boxes.get(&id) {
+                        fill_comments(target, &comments);
+                    }
+                    self.comments.insert(id, comments);
+                }
             }
             Msg::Complete(id) => run(&sender, async move { service::complete(&id).await }),
             Msg::Snooze(id, until) => {

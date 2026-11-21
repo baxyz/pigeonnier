@@ -454,3 +454,46 @@ async fn a_configuration_is_proposed_from_owners_and_sections() {
         Err(EngineError::UnknownParent(_))
     ));
 }
+
+#[tokio::test]
+async fn the_comments_of_a_task_are_read_page_by_page_with_their_files() {
+    let todoist = todoist(&[task("1", false)]).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/comments"))
+        .and(wiremock::matchers::query_param("cursor", "next"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{ "id": "c1", "content": "premier", "posted_at": "2026-11-01T10:00:00Z" }],
+            "next_cursor": null,
+        })))
+        .mount(&todoist)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/comments"))
+        .and(wiremock::matchers::query_param("task_id", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "id": "c2", "content": "voir le PDF", "posted_at": "2026-11-02T10:00:00Z",
+                  "file_attachment": { "file_name": "plan.pdf", "file_size": 2048,
+                                       "file_url": "https://files.todoist.com/plan.pdf" } },
+                { "id": "c3", "content": "effacé", "is_deleted": true },
+            ],
+            "next_cursor": "next",
+        })))
+        .mount(&todoist)
+        .await;
+    let engine = engine(None, Some(&todoist));
+
+    let comments = engine.comments("td:1").await.unwrap();
+
+    let texts: Vec<&str> = comments
+        .iter()
+        .map(|comment| comment.content.as_str())
+        .collect();
+    assert_eq!(texts, ["premier", "voir le PDF"]);
+    let file = comments[1].attachment.as_ref().unwrap();
+    assert_eq!((file.name.as_str(), file.size), ("plan.pdf", Some(2048)));
+    assert!(matches!(
+        engine.comments("gh-pr:acme/tool#1").await,
+        Err(EngineError::NotTodoist(_))
+    ));
+}

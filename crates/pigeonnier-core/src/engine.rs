@@ -17,7 +17,7 @@ use crate::normalize::{Context, pull_request, roadmap_item, todoist_item};
 use crate::notify;
 use crate::source::SourceError;
 use crate::source::github::{GithubClient, Owner, ProjectRead, raw_project_item, raw_pull_request};
-use crate::source::todoist::{SyncState, TodoistClient, TodoistCommand};
+use crate::source::todoist::{Comment, SyncState, TodoistClient, TodoistCommand};
 use crate::view::{View, default_views};
 use crate::viewmodel::{self, Issue, Snapshot};
 
@@ -370,6 +370,19 @@ impl Engine {
         snapshot.github_connected = self.github.is_some();
         snapshot.todoist_connected = self.todoist.is_some();
         Ok(snapshot)
+    }
+
+    /// The comments of a Todoist task, read from the service each time: they are not synced.
+    ///
+    /// # Errors
+    /// Not a task, no Todoist connection, or a service failure.
+    pub async fn comments(&self, item_id: &str) -> Result<Vec<Comment>, EngineError> {
+        let id = todoist_id(item_id)?;
+        let todoist = self
+            .todoist
+            .as_ref()
+            .ok_or(EngineError::NotConnected("Todoist"))?;
+        Ok(todoist.comments(id).await?)
     }
 
     /// Marks a Todoist task done. Syncs first and refuses if the task is already gone, rather than
