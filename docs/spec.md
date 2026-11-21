@@ -54,9 +54,8 @@ milestone starts only once the gate is passed.
 through extensions.gnome.org and never required by the app); an MCP server so that Claude can read
 the list and add manual actions; other platforms.
 
-**Where things stand:** the code of M1 to M3 exists and works against made-up services. GitHub
-cannot be connected until the app has the client ID of its GitHub OAuth App (a task for the
-maintainer). Nothing has run against the real services yet.
+**Where things stand:** the code of M1 to M3 exists and works against made-up services. The app
+carries the client ID of its GitHub OAuth App. Nothing has run against the real services yet.
 
 ## Working rules
 

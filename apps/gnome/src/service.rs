@@ -226,11 +226,7 @@ pub async fn save_config(config: Config) -> Result<(), String> {
 /// waiting for the person in the background.
 pub async fn connect_github() -> Result<(String, String), String> {
     let service = service()?;
-    let flow = github_device_flow().ok_or_else(|| {
-        "Cette version de Pigeonnier ne sait pas encore se connecter à GitHub : il lui manque \
-         l'identifiant de son application GitHub."
-            .to_owned()
-    })?;
+    let flow = github_device_flow();
     let code = flow.start().await.map_err(readable)?;
     let answer = (code.user_code.clone(), code.verification_uri.clone());
     relm4::spawn(async move {
