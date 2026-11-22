@@ -55,7 +55,9 @@ The main menu (or `Ctrl+,`) brings the preferences back later. Tokens stay in th
 In the window: `j`/`k` move, `x` completes, `s` snoozes to tomorrow, `o` opens the page, `r`
 refreshes, `a` adds a task, `/` searches, `1` to `9` go to a project. A Todoist task unfolds on a
 click to show its description, its dates and labels, and its comments with their files; the arrow
-button opens it in Todoist. Narrowed down, the window becomes a sidebar.
+button opens it in Todoist. **Boîte de réception PR**, at the top of the sidebar, shows every pull
+request grouped by what it waits for, as GitHub's inbox does: à relire, à corriger, CI en échec,
+conflits, prêtes à merger, then mine waiting for review and my drafts. Narrowed down, the window becomes a sidebar.
 
 ## License
 
