@@ -27,7 +27,8 @@ const INBOX: &str = "@inbox";
 enum Mark<'a> {
     Dot(&'a str),
     Icon(&'a str),
-    None,
+    /// The colors of the projects, for the entry that shows them all.
+    Colors(Vec<&'a str>),
 }
 const FULL_SIZE: (i32, i32) = (1100, 760);
 
@@ -131,6 +132,24 @@ fn dot_color(color: &str) -> &str {
 
 pub(crate) fn escape(text: &str) -> String {
     gtk::glib::markup_escape_text(text).to_string()
+}
+
+/// Four small dots in the colors of the first projects: all of them.
+fn all_mark(colors: &[&str]) -> gtk::Grid {
+    const FALLBACK: [&str; 4] = ["blue", "green", "orange", "purple"];
+    let grid = gtk::Grid::new();
+    grid.set_valign(gtk::Align::Center);
+    let chosen = colors.iter().copied().chain(FALLBACK).take(4);
+    for (index, color) in (0..).zip(chosen) {
+        let label = gtk::Label::new(None);
+        label.set_markup(&format!(
+            "<span foreground=\"{}\">●</span>",
+            escape(dot_color(color))
+        ));
+        label.add_css_class("project-dot-small");
+        grid.attach(&label, index % 2, index / 2, 1, 1);
+    }
+    grid
 }
 
 pub(crate) fn dot(color: &str) -> gtk::Label {
@@ -532,11 +551,17 @@ impl App {
             let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             line.set_margin_top(6);
             line.set_margin_bottom(6);
-            match mark {
-                Mark::Dot(color) => line.append(&dot(color)),
-                Mark::Icon(icon) => line.append(&gtk::Image::from_icon_name(icon)),
-                Mark::None => {}
-            }
+            // A slot of the same width for every mark, so that the names line up.
+            let slot = gtk::CenterBox::new();
+            slot.set_size_request(16, -1);
+            slot.set_hexpand(false);
+            let mark: gtk::Widget = match mark {
+                Mark::Dot(color) => dot(color).upcast(),
+                Mark::Icon(icon) => gtk::Image::from_icon_name(icon).upcast(),
+                Mark::Colors(colors) => all_mark(&colors).upcast(),
+            };
+            slot.set_center_widget(Some(&mark));
+            line.append(&slot);
             let title = gtk::Label::new(Some(name));
             title.set_hexpand(true);
             title.set_xalign(0.0);
@@ -554,15 +579,36 @@ impl App {
                 self.projects.select_row(Some(&row));
             }
         };
+        let section = |title: &str| {
+            let label = gtk::Label::new(Some(title));
+            label.set_xalign(0.0);
+            label.add_css_class("heading");
+            label.add_css_class("dim-label");
+            label.set_margin_top(12);
+            label.set_margin_bottom(4);
+            let row = gtk::ListBoxRow::new();
+            row.set_child(Some(&label));
+            row.set_activatable(false);
+            row.set_selectable(false);
+            row.set_can_focus(false);
+            self.projects.append(&row);
+        };
         if snapshot.github_connected {
+            section("GitHub");
             add(
                 Some(INBOX),
-                "Boîte de réception PR",
+                "PR",
                 Mark::Icon("mail-unread-symbolic"),
                 snapshot.inbox_count,
             );
         }
-        add(None, "Tous", Mark::None, total);
+        section("Projets");
+        let colors: Vec<&str> = snapshot
+            .projects
+            .iter()
+            .map(|project| project.color.as_str())
+            .collect();
+        add(None, "Tous", Mark::Colors(colors), total);
         for project in &snapshot.projects {
             add(
                 Some(&project.id),
@@ -890,7 +936,7 @@ impl SimpleComponent for App {
         let sidebar_scroll = gtk::ScrolledWindow::new();
         sidebar_scroll.set_child(Some(&projects));
         sidebar_view.set_content(Some(&sidebar_scroll));
-        let sidebar_page = adw::NavigationPage::new(&sidebar_view, "Projets");
+        let sidebar_page = adw::NavigationPage::new(&sidebar_view, "Pigeonnier");
 
         let views = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         views.add_css_class("linked");

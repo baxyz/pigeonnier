@@ -6,3 +6,4 @@
 .state-badge { font-size: 0.85em; padding: 0 6px; border-radius: 6px; background: alpha(currentColor, 0.1); }
 .dimmed { opacity: 0.55; }
 .project-dot { font-size: 0.8em; }
+.project-dot-small { font-size: 0.45em; margin: -1px 0; }
