@@ -10,12 +10,13 @@ mod settings;
 use std::collections::{HashMap, HashSet};
 
 use pigeonnier_core::config::Config;
+use pigeonnier_core::discover::Suggestion;
 use pigeonnier_core::engine::Choices;
 use pigeonnier_core::viewmodel::{CommentVm, DetailsVm, ItemVm, ProjectVm, Snapshot};
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, RelmApp, SimpleComponent, adw, gtk};
 
-use crate::settings::Edit;
+use crate::settings::{DefaultsEdit, Edit};
 
 const APP_ID: &str = "io.github.baxyz.Pigeonnier";
 const SIDEBAR_SIZE: (i32, i32) = (340, 900);
@@ -43,21 +44,28 @@ enum Msg {
     QuickAdd(String),
     Search(String),
     Failed(String),
-    ShowSettings,
-    HideSettings,
+    /// Opens the preferences, on a page if given.
+    ShowPreferences(Option<&'static str>),
+    PreferencesClosed,
+    About,
     ConnectGithub,
     ConnectTodoist,
     GithubCode(String, String),
     OpenPage(String),
     Disconnect(&'static str),
-    LoadChoices,
-    ChoicesLoaded(Result<(Config, Choices), String>),
+    LoadPreferences,
+    PreferencesLoaded(Result<(Config, Choices), String>),
     EditProject(usize, Edit),
+    EditDefaults(DefaultsEdit),
     AddProject,
     Propose(Option<String>),
+    ApplySuggestion(usize),
+    IgnoreSuggestion(String),
+    /// Puts back the configuration an action replaced.
+    RestoreConfig(Config),
+    /// The configuration is written and in use; here are the suggestions left.
+    ConfigApplied(Result<Vec<Suggestion>, String>),
     Expanded(usize, bool),
-    SaveProjects,
-    Saved(Result<(), String>),
 }
 
 struct App {
@@ -72,13 +80,16 @@ struct App {
     search_entry: gtk::SearchEntry,
     search: String,
     quick: gtk::Entry,
-    settings_open: bool,
-    /// The projects being edited in the settings, saved only on "Enregistrer".
-    draft: Option<Config>,
+    preferences: Option<settings::Preferences>,
+    /// The configuration being edited in the preferences; every change is written at once.
+    config: Option<Config>,
+    /// The configuration changed since the preferences opened: refresh when they close.
+    config_changed: bool,
+    suggestions: Vec<Suggestion>,
     choices: Option<Choices>,
     choices_error: Option<String>,
     loading_choices: bool,
-    /// The project open in the settings, kept open when the page is drawn again.
+    /// The project open in the preferences, kept open when they are drawn again.
     expanded: Option<usize>,
     projects: gtk::ListBox,
     list: gtk::Box,
@@ -440,8 +451,9 @@ impl App {
             return;
         };
         self.place_views();
-        if snapshot.needs_setup || self.settings_open {
-            self.draw_settings(&snapshot);
+        if snapshot.needs_setup {
+            self.list
+                .append(&settings::welcome(&self.sender, &snapshot));
             return;
         }
         let query = self.search.to_lowercase();
@@ -577,12 +589,11 @@ impl App {
                 error.to_owned()
             },
         );
-        // The settings page already says the same thing.
-        let on_connections = self.settings_open
-            || self
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.needs_setup);
+        // The welcome page already says the same thing.
+        let on_connections = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.needs_setup);
         self.banner.set_title(&escape(&text));
         self.banner
             .set_revealed(!text.is_empty() && (error.is_some() || !on_connections));
@@ -591,27 +602,24 @@ impl App {
             .set_button_label(reconnect.then_some("Connecter"));
     }
 
-    fn in_settings(&self) -> bool {
-        self.settings_open
-            || self
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.needs_setup)
+    fn needs_setup(&self) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.needs_setup)
     }
 
     /// In the narrow layout the filters no longer fit in the header, so they get a bar of their own.
-    /// The settings show none of the list's controls.
+    /// The welcome page shows none of the list's controls.
     fn place_views(&self) {
-        let in_settings = self.in_settings();
-        self.quick.set_visible(!in_settings);
-        self.header.set_show_back_button(!in_settings);
-        self.split.set_collapsed(in_settings || self.compact);
-        if in_settings {
+        let welcome = self.needs_setup();
+        self.quick.set_visible(!welcome);
+        self.header.set_show_back_button(!welcome);
+        self.split.set_collapsed(welcome || self.compact);
+        if welcome {
             self.split.set_show_content(true);
             self.views_bar.set_center_widget(None::<&gtk::Widget>);
             self.views_bar.set_visible(false);
-            let title = adw::WindowTitle::new("Pigeonnier", "Réglages");
-            self.header.set_title_widget(Some(&title));
+            self.header.set_title_widget(None::<&gtk::Widget>);
             return;
         }
         if self.compact {
@@ -622,6 +630,19 @@ impl App {
             self.header.set_title_widget(Some(&self.views));
         }
         self.views_bar.set_visible(self.compact);
+    }
+
+    /// Writes the configuration being edited and uses it at once; `redraw` when the preferences
+    /// must show the change.
+    fn commit(&mut self, sender: &ComponentSender<Self>, redraw: bool) {
+        let (Some(config), Some(choices)) = (&self.config, &self.choices) else {
+            return;
+        };
+        self.config_changed = true;
+        apply_config(sender, config.clone(), choices.clone());
+        if redraw {
+            self.draw_preferences();
+        }
     }
 
     fn focus_row(&mut self, index: usize) {
@@ -635,7 +656,7 @@ impl App {
     }
 
     fn on_key(&mut self, key: char) {
-        if self.in_settings() {
+        if self.needs_setup() || self.preferences.is_some() {
             return;
         }
         let current = self
@@ -744,6 +765,39 @@ impl App {
     }
 }
 
+/// The primary menu, as GNOME apps have it: the preferences and the about dialog.
+fn main_menu(window: &adw::ApplicationWindow, sender: &ComponentSender<App>) -> gtk::MenuButton {
+    let action = |name: &str, message: fn() -> Msg| {
+        let action = gtk::gio::SimpleAction::new(name, None);
+        let sender = sender.clone();
+        action.connect_activate(move |_, _| sender.input(message()));
+        window.add_action(&action);
+    };
+    action("preferences", || Msg::ShowPreferences(None));
+    action("about", || Msg::About);
+    relm4::main_application().set_accels_for_action("win.preferences", &["<Control>comma"]);
+    let menu = gtk::gio::Menu::new();
+    menu.append(Some("Préférences"), Some("win.preferences"));
+    menu.append(Some("À propos de Pigeonnier"), Some("win.about"));
+    let button = gtk::MenuButton::new();
+    button.set_icon_name("open-menu-symbolic");
+    button.set_menu_model(Some(&menu));
+    button.set_primary(true);
+    button.set_tooltip_text(Some("Menu principal"));
+    button
+}
+
+/// Writes `config` and uses it at once; the answer brings the suggestions left.
+fn apply_config(sender: &ComponentSender<App>, config: Config, choices: Choices) {
+    let sender = sender.clone();
+    relm4::spawn(async move {
+        let config = settings::finalize(config);
+        sender.input(Msg::ConfigApplied(
+            service::apply_config(config, choices).await,
+        ));
+    });
+}
+
 fn spawn_load(sender: &ComponentSender<App>, view: String) {
     let sender = sender.clone();
     relm4::spawn(async move {
@@ -815,15 +869,14 @@ impl SimpleComponent for App {
         refresh.connect_clicked(move |_| refresh_sender.input(Msg::Refresh));
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&views));
+        header.pack_end(&main_menu(&window, &sender));
         header.pack_end(&refresh);
-        let settings = icon_button("emblem-system-symbolic", "Réglages");
-        let settings_sender = sender.clone();
-        settings.connect_clicked(move |_| settings_sender.input(Msg::ShowSettings));
-        header.pack_end(&settings);
 
         let banner = adw::Banner::new("");
         let banner_sender = sender.clone();
-        banner.connect_button_clicked(move |_| banner_sender.input(Msg::ShowSettings));
+        banner.connect_button_clicked(move |_| {
+            banner_sender.input(Msg::ShowPreferences(Some(settings::PAGE_ACCOUNTS)));
+        });
 
         let search_entry = gtk::SearchEntry::new();
         search_entry.set_hexpand(true);
@@ -916,8 +969,10 @@ impl SimpleComponent for App {
             search_entry,
             search: String::new(),
             quick,
-            settings_open: false,
-            draft: None,
+            preferences: None,
+            config: None,
+            config_changed: false,
+            suggestions: Vec::new(),
             choices: None,
             choices_error: None,
             loading_choices: false,
@@ -952,11 +1007,11 @@ impl SimpleComponent for App {
                     (known.github_connected, known.todoist_connected)
                         != (snapshot.github_connected, snapshot.todoist_connected)
                 });
-                let in_settings = self.settings_open || snapshot.needs_setup;
-                if in_settings && (accounts_changed || self.choices.is_none()) {
-                    sender.input(Msg::LoadChoices);
-                }
                 self.snapshot = Some(snapshot);
+                if self.preferences.is_some() && accounts_changed {
+                    self.draw_preferences();
+                    sender.input(Msg::LoadPreferences);
+                }
                 if views_changed {
                     self.draw_views();
                 }
@@ -1046,20 +1101,25 @@ impl SimpleComponent for App {
                 self.banner.set_button_label(None);
                 self.banner.set_revealed(true);
             }
-            Msg::ShowSettings => {
-                self.settings_open = true;
-                self.split.set_show_content(true);
-                sender.input(Msg::LoadChoices);
-                self.draw_list();
-                self.draw_banner(None);
-            }
-            Msg::HideSettings => {
-                self.settings_open = false;
-                self.draft = None;
-                self.choices = None;
+            Msg::ShowPreferences(page) => self.open_preferences(page),
+            Msg::PreferencesClosed => {
+                self.preferences = None;
                 self.expanded = None;
-                self.draw_list();
-                self.draw_banner(None);
+                if std::mem::take(&mut self.config_changed) {
+                    service::refresh();
+                }
+            }
+            Msg::About => {
+                let about = adw::AboutDialog::new();
+                about.set_application_name("Pigeonnier");
+                about.set_application_icon(APP_ID);
+                about.set_version(env!("CARGO_PKG_VERSION"));
+                about.set_developer_name("baxyz");
+                about.set_comments("Ce qui t'attend, projet par projet.");
+                about.set_website("https://github.com/baxyz/pigeonnier");
+                about.set_issue_url("https://github.com/baxyz/pigeonnier/issues");
+                about.set_license_type(gtk::License::Agpl30);
+                about.present(Some(&self.window));
             }
             Msg::ConnectGithub => {
                 let sender = sender.clone();
@@ -1084,7 +1144,7 @@ impl SimpleComponent for App {
             Msg::Disconnect(service) => {
                 run(&sender, async move { service::disconnect(service).await });
             }
-            Msg::LoadChoices => {
+            Msg::LoadPreferences => {
                 if !self.loading_choices {
                     self.loading_choices = true;
                     self.choices_error = None;
@@ -1092,55 +1152,107 @@ impl SimpleComponent for App {
                     relm4::spawn(async move {
                         let result =
                             async { Ok((service::config().await?, service::choices().await?)) };
-                        sender.input(Msg::ChoicesLoaded(result.await));
+                        sender.input(Msg::PreferencesLoaded(result.await));
                     });
                 }
             }
-            Msg::ChoicesLoaded(result) => {
+            Msg::PreferencesLoaded(result) => {
                 self.loading_choices = false;
                 match result {
-                    Ok((config, choices)) => {
-                        if self.draft.is_none() {
-                            self.draft = Some(if config.projects.is_empty() {
-                                let parent = settings::guess_parent(&choices);
-                                settings::propose(&choices, parent.as_deref())
-                            } else {
-                                config
-                            });
+                    Ok((mut config, choices)) => {
+                        // Edits made while the accounts were read are kept.
+                        if !self.config_changed || self.config.is_none() {
+                            settings::assign_ids(&mut config);
+                            self.config = Some(config);
                         }
+                        let (sender, wanted) = (sender.clone(), choices.clone());
+                        relm4::spawn(async move {
+                            sender.input(Msg::ConfigApplied(service::suggestions(wanted).await));
+                        });
                         self.choices = Some(choices);
                     }
                     Err(error) => self.choices_error = Some(error),
                 }
-                self.draw_list();
+                self.draw_preferences();
             }
             Msg::EditProject(index, edit) => {
-                if let Some(draft) = &mut self.draft {
-                    if matches!(edit, Edit::Remove) {
-                        self.expanded = None;
-                    }
-                    if settings::apply(draft, index, edit) {
-                        self.draw_list();
-                    }
+                let Some(config) = &mut self.config else {
+                    return;
+                };
+                let previous = config.clone();
+                let removed = matches!(edit, Edit::Remove);
+                let redraw = settings::apply(config, index, edit);
+                if removed {
+                    self.expanded = None;
+                    self.toast_undo("Projet retiré", previous);
                 }
+                self.commit(&sender, redraw);
+            }
+            Msg::EditDefaults(edit) => {
+                let Some(config) = &mut self.config else {
+                    return;
+                };
+                // The projects say which choice of issues they follow by default.
+                let redraw = matches!(edit, DefaultsEdit::Issues(_));
+                settings::apply_defaults(config, edit);
+                self.commit(&sender, redraw);
             }
             Msg::AddProject => {
-                if let Some(draft) = &mut self.draft {
-                    let index = draft.projects.len();
-                    draft.projects.push(settings::new_project(index));
-                    self.expanded = Some(index);
-                    self.draw_list();
-                }
+                let Some(config) = &mut self.config else {
+                    return;
+                };
+                let index = config.projects.len();
+                config.projects.push(settings::new_project(index));
+                settings::assign_ids(config);
+                self.expanded = Some(index);
+                self.commit(&sender, true);
             }
             Msg::Propose(parent) => {
-                if let (Some(draft), Some(choices)) = (&mut self.draft, &self.choices) {
-                    let proposal = settings::propose(choices, parent.as_deref());
-                    draft.defaults.todoist_parent = proposal.defaults.todoist_parent;
-                    draft.projects = proposal.projects;
-                    self.expanded = None;
-                    self.draw_list();
-                }
+                let (Some(config), Some(choices)) = (&mut self.config, &self.choices) else {
+                    return;
+                };
+                let previous = config.clone();
+                let proposal = settings::propose(choices, parent.as_deref());
+                config.defaults.todoist_parent = proposal.defaults.todoist_parent;
+                config.projects = proposal.projects;
+                settings::assign_ids(config);
+                self.expanded = None;
+                self.toast_undo("Projets remplacés par la proposition", previous);
+                self.commit(&sender, true);
             }
+            Msg::ApplySuggestion(index) => {
+                let (Some(config), Some(suggestion)) =
+                    (&mut self.config, self.suggestions.get(index).cloned())
+                else {
+                    return;
+                };
+                let previous = config.clone();
+                suggestion.change.apply(config);
+                settings::assign_ids(config);
+                self.suggestions.remove(index);
+                self.toast_undo("Suggestion appliquée", previous);
+                self.commit(&sender, true);
+            }
+            Msg::IgnoreSuggestion(key) => {
+                let Some(config) = &mut self.config else {
+                    return;
+                };
+                config.ignored_suggestions.push(key.clone());
+                self.suggestions.retain(|suggestion| suggestion.key != key);
+                self.commit(&sender, true);
+            }
+            Msg::RestoreConfig(previous) => {
+                self.config = Some(previous);
+                self.commit(&sender, true);
+            }
+            Msg::ConfigApplied(Ok(suggestions)) => {
+                if suggestions != self.suggestions {
+                    self.suggestions = suggestions;
+                    self.draw_preferences();
+                }
+                spawn_load(&sender, self.view.clone());
+            }
+            Msg::ConfigApplied(Err(error)) => sender.input(Msg::Failed(error)),
             Msg::Expanded(index, open) => {
                 if open {
                     self.expanded = Some(index);
@@ -1148,20 +1260,6 @@ impl SimpleComponent for App {
                     self.expanded = None;
                 }
             }
-            Msg::SaveProjects => {
-                if let Some(draft) = self.draft.clone() {
-                    let config = settings::finalize(draft);
-                    let sender = sender.clone();
-                    relm4::spawn(async move {
-                        sender.input(Msg::Saved(service::save_config(config).await));
-                    });
-                }
-            }
-            Msg::Saved(Ok(())) => {
-                sender.input(Msg::HideSettings);
-                spawn_load(&sender, self.view.clone());
-            }
-            Msg::Saved(Err(error)) => sender.input(Msg::Failed(error)),
             Msg::ActionDone(result) => {
                 if let Err(error) = result {
                     self.banner.set_title(&escape(&error));
