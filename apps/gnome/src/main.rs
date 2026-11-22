@@ -640,7 +640,9 @@ impl App {
     /// The welcome page shows none of the list's controls.
     fn place_views(&self) {
         let welcome = self.needs_setup();
-        self.quick.set_visible(!welcome);
+        // Tasks are added to a project; the inbox only holds pull requests.
+        self.quick
+            .set_visible(!welcome && self.project.as_deref() != Some(INBOX));
         self.header.set_show_back_button(!welcome);
         self.split.set_collapsed(welcome || self.compact);
         if welcome {
