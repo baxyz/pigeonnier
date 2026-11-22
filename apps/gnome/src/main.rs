@@ -20,6 +20,15 @@ use crate::settings::{DefaultsEdit, Edit};
 
 const APP_ID: &str = "io.github.baxyz.Pigeonnier";
 const SIDEBAR_SIZE: (i32, i32) = (340, 900);
+/// The sidebar entry of the pull request inbox, beside the projects' identifiers.
+const INBOX: &str = "@inbox";
+
+/// What stands before a sidebar entry.
+enum Mark<'a> {
+    Dot(&'a str),
+    Icon(&'a str),
+    None,
+}
 const FULL_SIZE: (i32, i32) = (1100, 760);
 
 #[derive(Debug)]
@@ -456,6 +465,11 @@ impl App {
                 .append(&settings::welcome(&self.sender, &snapshot));
             return;
         }
+        // The inbox shows the same pull requests, grouped by what each one waits for.
+        let in_inbox = self.project.as_deref() == Some(INBOX);
+        if in_inbox {
+            snapshot.projects = std::mem::take(&mut snapshot.inbox);
+        }
         let query = self.search.to_lowercase();
         if !query.is_empty() {
             let matches = |item: &ItemVm| {
@@ -482,12 +496,16 @@ impl App {
         let shown: Vec<&ProjectVm> = snapshot
             .projects
             .iter()
-            .filter(|project| self.project.as_ref().is_none_or(|id| *id == project.id))
+            .filter(|project| in_inbox || self.project.as_ref().is_none_or(|id| *id == project.id))
             .collect();
         if shown.is_empty() {
             let page = adw::StatusPage::new();
             page.set_icon_name(Some("emblem-ok-symbolic"));
-            page.set_title("Rien à faire");
+            page.set_title(if in_inbox {
+                "Aucune PR ne t'attend"
+            } else {
+                "Rien à faire"
+            });
             page.set_vexpand(true);
             self.list.append(&page);
             return;
@@ -510,12 +528,14 @@ impl App {
             .iter()
             .map(|project| project.action_count)
             .sum();
-        let add = |id: Option<&str>, name: &str, color: Option<&str>, count: u32| {
+        let add = |id: Option<&str>, name: &str, mark: Mark, count: u32| {
             let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             line.set_margin_top(6);
             line.set_margin_bottom(6);
-            if let Some(color) = color {
-                line.append(&dot(color));
+            match mark {
+                Mark::Dot(color) => line.append(&dot(color)),
+                Mark::Icon(icon) => line.append(&gtk::Image::from_icon_name(icon)),
+                Mark::None => {}
             }
             let title = gtk::Label::new(Some(name));
             title.set_hexpand(true);
@@ -534,12 +554,20 @@ impl App {
                 self.projects.select_row(Some(&row));
             }
         };
-        add(None, "Tous", None, total);
+        if snapshot.github_connected {
+            add(
+                Some(INBOX),
+                "Boîte de réception PR",
+                Mark::Icon("mail-unread-symbolic"),
+                snapshot.inbox_count,
+            );
+        }
+        add(None, "Tous", Mark::None, total);
         for project in &snapshot.projects {
             add(
                 Some(&project.id),
                 &project.name,
-                Some(&project.color),
+                Mark::Dot(&project.color),
                 project.action_count,
             );
         }
