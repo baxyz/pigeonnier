@@ -273,7 +273,7 @@ impl Engine {
             project
                 .github
                 .as_ref()
-                .filter(|link| link.issues == IssueScope::All)
+                .filter(|link| self.config.issue_scope(link) == IssueScope::All)
         }) {
             let scope: Vec<String> = if link.repos.is_empty() {
                 let owner = if link.owner == "@me" { me } else { &link.owner };
