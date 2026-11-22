@@ -86,16 +86,25 @@ pub fn repo_options(choices: &Choices, owner: &str) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// What a project can list of the issues: `(value, label)`, after "Aucune".
+/// The choices of issues, in the order they are offered.
+pub const ISSUE_SCOPES: [IssueScope; 3] = [IssueScope::None, IssueScope::Assigned, IssueScope::All];
+
+#[must_use]
+pub fn issue_label(scope: IssueScope) -> &'static str {
+    match scope {
+        IssueScope::None => "Aucune",
+        IssueScope::Assigned => "Celles qui me sont assignées",
+        IssueScope::All => "Toutes les ouvertes",
+    }
+}
+
+/// What a project can list of the issues: `(value, label)`, after the default choice.
 #[must_use]
 pub fn issue_options() -> Vec<(IssueScope, String)> {
-    vec![
-        (
-            IssueScope::Assigned,
-            "Celles qui me sont assignées".to_owned(),
-        ),
-        (IssueScope::All, "Toutes les ouvertes".to_owned()),
-    ]
+    ISSUE_SCOPES
+        .iter()
+        .map(|scope| (*scope, issue_label(*scope).to_owned()))
+        .collect()
 }
 
 /// Every Todoist section: `(project, section)`.
@@ -190,15 +199,23 @@ pub fn new_project(index: usize) -> Project {
     }
 }
 
-/// Ready to save: unnamed projects are dropped, and each project gets a unique identifier.
+/// Ready to save: unnamed projects are dropped, and each project has a unique identifier.
 #[must_use]
 pub fn finalize(mut config: Config) -> Config {
     config
         .projects
         .retain(|project| !project.name.trim().is_empty());
-    let mut taken: Vec<String> = Vec::new();
     for project in &mut config.projects {
         project.name = project.name.trim().to_owned();
+    }
+    assign_ids(&mut config);
+    config
+}
+
+/// Gives each project a unique identifier, keeping the ones it has.
+pub fn assign_ids(config: &mut Config) {
+    let mut taken: Vec<String> = Vec::new();
+    for project in &mut config.projects {
         let base = if project.id.is_empty() {
             discover::slug(&project.name)
         } else {
@@ -218,7 +235,6 @@ pub fn finalize(mut config: Config) -> Config {
         taken.push(id.clone());
         project.id = id;
     }
-    config
 }
 
 /// One line saying what a project gathers.
@@ -240,7 +256,7 @@ pub fn summary(config: &Config, project: &Project) -> String {
             github.push_str(", Project #");
             github.push_str(&number.to_string());
         }
-        github.push_str(match link.issues {
+        github.push_str(match config.issue_scope(link) {
             IssueScope::None => ", sans issues",
             IssueScope::Assigned => ", mes issues",
             IssueScope::All => ", toutes les issues",
@@ -267,6 +283,7 @@ pub enum Edit {
     Owner(Option<String>),
     /// One repository of the owner, or `None` for all of them.
     Repo(Option<String>),
+    /// `None` follows the default.
     Issues(Option<IssueScope>),
     GithubProject(Option<u32>),
     Section(Option<(String, String)>),
@@ -287,7 +304,7 @@ pub fn apply(config: &mut Config, index: usize, edit: Edit) -> bool {
     match edit {
         Edit::Name(name) => {
             project.name = name;
-            false
+            true
         }
         Edit::Owner(owner) => {
             let unchanged = project.github.as_ref().map(|link| &link.owner) == owner.as_ref();
@@ -304,7 +321,7 @@ pub fn apply(config: &mut Config, index: usize, edit: Edit) -> bool {
         }
         Edit::Issues(scope) => {
             if let Some(link) = &mut project.github {
-                link.issues = scope.unwrap_or(IssueScope::None);
+                link.issues = scope;
             }
             false
         }
@@ -325,13 +342,45 @@ pub fn apply(config: &mut Config, index: usize, edit: Edit) -> bool {
     }
 }
 
-/// The greeting of the first run. Not a status page: one would scroll on its own inside the list.
-fn welcome() -> gtk::Box {
+/// A change on the "Application" page.
+#[derive(Debug)]
+pub enum DefaultsEdit {
+    Issues(IssueScope),
+    IncludeAssigned(bool),
+    DirectReviewsOnly(bool),
+    EscalationDays(u32),
+    Refresh(&'static str),
+    ClaudeLabel(String),
+}
+
+/// How often to refresh: `(value in the configuration, label)`.
+pub const REFRESH_CHOICES: [(&str, &str); 5] = [
+    ("2m", "2 minutes"),
+    ("5m", "5 minutes"),
+    ("10m", "10 minutes"),
+    ("15m", "15 minutes"),
+    ("30m", "30 minutes"),
+];
+
+pub fn apply_defaults(config: &mut Config, edit: DefaultsEdit) {
+    let defaults = &mut config.defaults;
+    match edit {
+        DefaultsEdit::Issues(scope) => defaults.issues = scope,
+        DefaultsEdit::IncludeAssigned(on) => defaults.include_assigned = on,
+        DefaultsEdit::DirectReviewsOnly(on) => defaults.direct_reviews_only = on,
+        DefaultsEdit::EscalationDays(days) => defaults.review_escalation_days = days,
+        DefaultsEdit::Refresh(every) => every.clone_into(&mut defaults.refresh),
+        DefaultsEdit::ClaudeLabel(label) => label.trim().clone_into(&mut defaults.claude_label),
+    }
+}
+
+/// The greeting of the first run, in the main window.
+pub fn welcome(sender: &relm4::ComponentSender<App>, snapshot: &Snapshot) -> gtk::Box {
     let welcome = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    welcome.set_margin_top(24);
-    welcome.set_margin_bottom(12);
+    welcome.set_margin_top(48);
+    welcome.set_valign(gtk::Align::Center);
     let icon = gtk::Image::from_icon_name("io.github.baxyz.Pigeonnier");
-    icon.set_pixel_size(96);
+    icon.set_pixel_size(128);
     welcome.append(&icon);
     let title = gtk::Label::new(Some("Bienvenue dans Pigeonnier"));
     title.add_css_class("title-1");
@@ -342,7 +391,69 @@ fn welcome() -> gtk::Box {
     text.set_wrap(true);
     text.set_justify(gtk::Justification::Center);
     welcome.append(&text);
+    let start = gtk::Button::with_label("Configurer Pigeonnier");
+    start.add_css_class("pill");
+    start.add_css_class("suggested-action");
+    start.set_halign(gtk::Align::Center);
+    start.set_margin_top(12);
+    let page = if snapshot.github_connected || snapshot.todoist_connected {
+        PAGE_PROJECTS
+    } else {
+        PAGE_ACCOUNTS
+    };
+    let sender = sender.clone();
+    start.connect_clicked(move |_| sender.input(Msg::ShowPreferences(Some(page))));
+    welcome.append(&start);
     welcome
+}
+
+pub const PAGE_PROJECTS: &str = "projects";
+pub const PAGE_ACCOUNTS: &str = "accounts";
+pub const PAGE_APP: &str = "app";
+
+/// The preferences dialog and what was put in its pages, to take out when it is drawn again.
+pub struct Preferences {
+    pub dialog: adw::PreferencesDialog,
+    pages: [adw::PreferencesPage; 3],
+    groups: Vec<(usize, adw::PreferencesGroup)>,
+}
+
+impl Preferences {
+    fn new() -> Self {
+        let dialog = adw::PreferencesDialog::new();
+        dialog.set_search_enabled(false);
+        dialog.set_content_width(720);
+        dialog.set_content_height(680);
+        let page = |name: &str, title: &str, icon: &str| {
+            let page = adw::PreferencesPage::new();
+            page.set_name(Some(name));
+            page.set_title(title);
+            page.set_icon_name(Some(icon));
+            dialog.add(&page);
+            page
+        };
+        let pages = [
+            page(PAGE_PROJECTS, "Projets", "view-grid-symbolic"),
+            page(PAGE_ACCOUNTS, "Comptes", "system-users-symbolic"),
+            page(PAGE_APP, "Application", "preferences-system-symbolic"),
+        ];
+        Self {
+            dialog,
+            pages,
+            groups: Vec::new(),
+        }
+    }
+
+    fn add(&mut self, page: usize, group: adw::PreferencesGroup) {
+        self.pages[page].add(&group);
+        self.groups.push((page, group));
+    }
+
+    fn clear(&mut self) {
+        for (page, group) in self.groups.drain(..) {
+            self.pages[page].remove(&group);
+        }
+    }
 }
 
 fn combo(title: &str, labels: &[String], selected: usize) -> adw::ComboRow {
@@ -358,68 +469,75 @@ fn selected(row: &adw::ComboRow) -> usize {
     usize::try_from(row.selected()).unwrap_or(0)
 }
 
+fn note_row(title: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::new();
+    row.set_title(title);
+    row
+}
+
 impl App {
-    /// A drop-down of `options` after a "none" entry; picking one edits project `index`.
-    fn choice_row<T: Clone + 'static>(
-        &self,
-        (title, none): (&str, &str),
-        options: Vec<(T, String)>,
-        current: Option<usize>,
-        index: usize,
-        edit: fn(Option<T>) -> Edit,
-    ) -> adw::ComboRow {
-        let mut labels = vec![none.to_owned()];
-        labels.extend(options.iter().map(|(_, label)| label.clone()));
-        let row = combo(title, &labels, current.map_or(0, |position| position + 1));
-        let values: Vec<T> = options.into_iter().map(|(value, _)| value).collect();
-        let sender = self.sender.clone();
-        row.connect_selected_notify(move |row| {
-            let value = selected(row)
-                .checked_sub(1)
-                .and_then(|position| values.get(position).cloned());
-            sender.input(Msg::EditProject(index, edit(value)));
-        });
-        row
-    }
-
-    /// The first thing a new user sees, and the settings later.
-    pub(crate) fn draw_settings(&self, snapshot: &Snapshot) {
-        if snapshot.needs_setup {
-            self.list.append(&welcome());
-        }
-        self.draw_accounts(snapshot);
-        let proposal = self.draw_projects_editor(snapshot);
-
-        let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        footer.set_halign(gtk::Align::End);
-        if !snapshot.needs_setup {
-            let cancel = gtk::Button::with_label("Annuler");
+    /// Opens the preferences, on `page` if given, and reads the accounts again in the background.
+    pub(crate) fn open_preferences(&mut self, page: Option<&str>) {
+        if self.preferences.is_none() {
+            let preferences = Preferences::new();
             let sender = self.sender.clone();
-            cancel.connect_clicked(move |_| sender.input(Msg::HideSettings));
-            footer.append(&cancel);
+            preferences
+                .dialog
+                .connect_closed(move |_| sender.input(Msg::PreferencesClosed));
+            self.preferences = Some(preferences);
+            self.draw_preferences();
+            if let Some(preferences) = &self.preferences {
+                preferences.dialog.present(Some(&self.window));
+            }
         }
-        let save = gtk::Button::with_label("Enregistrer");
-        save.add_css_class("suggested-action");
-        save.set_sensitive(
-            self.draft
-                .as_ref()
-                .is_some_and(|draft| !draft.projects.is_empty()),
-        );
-        let sender = self.sender.clone();
-        save.connect_clicked(move |_| sender.input(Msg::SaveProjects));
-        footer.append(&save);
-        self.list.append(&footer);
-        if let Some(proposal) = proposal {
-            self.list.append(&proposal);
+        if let (Some(preferences), Some(page)) = (&self.preferences, page) {
+            preferences.dialog.set_visible_page_name(page);
         }
+        self.sender.input(Msg::LoadPreferences);
     }
 
-    fn draw_accounts(&self, snapshot: &Snapshot) {
+    /// Draws the three pages again from the configuration, the choices and the suggestions.
+    pub(crate) fn draw_preferences(&mut self) {
+        let Some(mut preferences) = self.preferences.take() else {
+            return;
+        };
+        preferences.clear();
+        for group in self.projects_page() {
+            preferences.add(0, group);
+        }
+        preferences.add(1, self.accounts_group());
+        for group in self.app_page() {
+            preferences.add(2, group);
+        }
+        self.preferences = Some(preferences);
+    }
+
+    /// Shows a message in the preferences, with a button that puts `previous` back.
+    pub(crate) fn toast_undo(&self, title: &str, previous: Config) {
+        let Some(preferences) = &self.preferences else {
+            return;
+        };
+        let toast = adw::Toast::new(title);
+        toast.set_button_label(Some("Annuler"));
+        let sender = self.sender.clone();
+        let previous = std::cell::RefCell::new(Some(previous));
+        toast.connect_button_clicked(move |_| {
+            if let Some(previous) = previous.borrow_mut().take() {
+                sender.input(Msg::RestoreConfig(previous));
+            }
+        });
+        preferences.dialog.add_toast(toast);
+    }
+
+    fn accounts_group(&self) -> adw::PreferencesGroup {
         let group = adw::PreferencesGroup::new();
         group.set_title("Comptes");
         group.set_description(Some(
             "Pigeonnier lit tes PR et tes tâches. Les jetons restent dans le trousseau de cet ordinateur.",
         ));
+        let (github, todoist) = self.snapshot.as_ref().map_or((false, false), |snapshot| {
+            (snapshot.github_connected, snapshot.todoist_connected)
+        });
         let add = |name: &str, connected: bool, connect: Msg, service: &'static str| {
             let row = adw::ActionRow::new();
             row.set_title(name);
@@ -449,79 +567,113 @@ impl App {
             row.add_suffix(&button);
             group.add(&row);
         };
-        add(
-            "GitHub",
-            snapshot.github_connected,
-            Msg::ConnectGithub,
-            "github",
-        );
-        add(
-            "Todoist",
-            snapshot.todoist_connected,
-            Msg::ConnectTodoist,
-            "todoist",
-        );
-        self.list.append(&group);
+        add("GitHub", github, Msg::ConnectGithub, "github");
+        add("Todoist", todoist, Msg::ConnectTodoist, "todoist");
+        group
     }
 
-    /// Draws the projects, and returns the proposal group to place after the buttons.
-    fn draw_projects_editor(&self, snapshot: &Snapshot) -> Option<adw::PreferencesGroup> {
+    /// The suggestions, the projects and the automatic proposal, or why they cannot be shown yet.
+    fn projects_page(&self) -> Vec<adw::PreferencesGroup> {
         let group = adw::PreferencesGroup::new();
         group.set_title("Projets");
         group.set_description(Some(
             "Un projet rassemble un compte, une org ou un dépôt GitHub avec ses issues, éventuellement son GitHub Project, et une section Todoist.",
         ));
-        self.list.append(&group);
-        if !snapshot.github_connected && !snapshot.todoist_connected {
-            let row = adw::ActionRow::new();
-            row.set_title("Connecte au moins un compte pour choisir tes projets");
+        let connected = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.github_connected || snapshot.todoist_connected);
+        if !connected {
+            let row = note_row("Connecte au moins un compte pour choisir tes projets");
+            let go = gtk::Button::with_label("Comptes");
+            go.set_valign(gtk::Align::Center);
+            let preferences = self.preferences.as_ref().map(|p| p.dialog.clone());
+            go.connect_clicked(move |_| {
+                if let Some(dialog) = &preferences {
+                    dialog.set_visible_page_name(PAGE_ACCOUNTS);
+                }
+            });
+            row.add_suffix(&go);
             group.add(&row);
-            return None;
+            return vec![group];
         }
-        if let Some(error) = &self.choices_error {
-            let row = adw::ActionRow::new();
-            row.set_title("Impossible de lire tes comptes");
-            row.set_subtitle(&escape(error));
-            let retry = gtk::Button::with_label("Réessayer");
-            retry.set_valign(gtk::Align::Center);
-            let sender = self.sender.clone();
-            retry.connect_clicked(move |_| sender.input(Msg::LoadChoices));
-            row.add_suffix(&retry);
-            group.add(&row);
-            return None;
-        }
-        let (Some(draft), Some(choices)) = (&self.draft, &self.choices) else {
-            let row = adw::ActionRow::new();
-            row.set_title("Lecture de tes comptes…");
-            row.add_prefix(&gtk::Spinner::builder().spinning(true).build());
-            group.add(&row);
-            return None;
+        let (Some(config), Some(choices)) = (&self.config, &self.choices) else {
+            if let Some(error) = &self.choices_error {
+                let row = note_row("Impossible de lire tes comptes");
+                row.set_subtitle(&escape(error));
+                let retry = gtk::Button::with_label("Réessayer");
+                retry.set_valign(gtk::Align::Center);
+                let sender = self.sender.clone();
+                retry.connect_clicked(move |_| sender.input(Msg::LoadPreferences));
+                row.add_suffix(&retry);
+                group.add(&row);
+            } else {
+                let row = note_row("Lecture de tes comptes…");
+                row.add_prefix(&gtk::Spinner::builder().spinning(true).build());
+                group.add(&row);
+            }
+            return vec![group];
         };
-
-        for (index, project) in draft.projects.iter().enumerate() {
-            group.add(&self.project_editor(draft, choices, index, project));
+        let mut groups = Vec::new();
+        if !self.suggestions.is_empty() {
+            groups.push(self.suggestions_group());
         }
-
+        for (index, project) in config.projects.iter().enumerate() {
+            group.add(&self.project_editor(config, choices, index, project));
+        }
         let add = adw::ButtonRow::new();
         add.set_title("Ajouter un projet");
         add.set_start_icon_name(Some("list-add-symbolic"));
         let sender = self.sender.clone();
         add.connect_activated(move |_| sender.input(Msg::AddProject));
         group.add(&add);
-        Some(self.proposal_group(choices, draft))
+        groups.push(group);
+        groups.push(self.proposal_group(choices, config));
+        groups
     }
 
-    fn proposal_group(&self, choices: &Choices, draft: &Config) -> adw::PreferencesGroup {
+    fn suggestions_group(&self) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Suggestions");
+        group.set_description(Some(
+            "D'après ce que voient tes comptes et ce qui tombe dans « Autres ».",
+        ));
+        for (index, suggestion) in self.suggestions.iter().enumerate() {
+            let row = adw::ActionRow::new();
+            row.set_title(&escape(&suggestion.title));
+            row.set_subtitle(&escape(&suggestion.detail));
+            let ignore = gtk::Button::from_icon_name("window-close-symbolic");
+            ignore.add_css_class("flat");
+            ignore.set_valign(gtk::Align::Center);
+            ignore.set_tooltip_text(Some("Ignorer cette suggestion"));
+            let sender = self.sender.clone();
+            let key = suggestion.key.clone();
+            ignore.connect_clicked(move |_| sender.input(Msg::IgnoreSuggestion(key.clone())));
+            let apply = gtk::Button::with_label("Appliquer");
+            apply.set_valign(gtk::Align::Center);
+            let sender = self.sender.clone();
+            apply.connect_clicked(move |_| sender.input(Msg::ApplySuggestion(index)));
+            row.add_suffix(&apply);
+            row.add_suffix(&ignore);
+            group.add(&row);
+        }
+        group
+    }
+
+    fn proposal_group(&self, choices: &Choices, config: &Config) -> adw::PreferencesGroup {
         let group = adw::PreferencesGroup::new();
         group.set_title("Proposition automatique");
         group.set_description(Some(
-            "Crée un projet par compte et par org GitHub, apparié à la section Todoist du même nom. Remplace la liste ci-dessus.",
+            "Crée un projet par compte et par org GitHub, apparié à la section Todoist du même nom. Remplace la liste des projets.",
         ));
         let mut labels = vec!["Aucun".to_owned()];
         labels.extend(choices.todoist.iter().map(|project| project.name.clone()));
-        let current = draft
+        let parent = config
             .defaults
             .todoist_parent
+            .clone()
+            .or_else(|| guess_parent(choices));
+        let current = parent
             .as_ref()
             .and_then(|parent| {
                 choices
@@ -549,10 +701,128 @@ impl App {
         group
     }
 
+    fn app_page(&self) -> Vec<adw::PreferencesGroup> {
+        let Some(config) = &self.config else {
+            let group = adw::PreferencesGroup::new();
+            group.add(&note_row("Lecture des réglages…"));
+            return vec![group];
+        };
+        let defaults = &config.defaults;
+        let issues = adw::PreferencesGroup::new();
+        issues.set_title("Issues GitHub");
+        let labels: Vec<String> = ISSUE_SCOPES
+            .iter()
+            .map(|scope| issue_label(*scope).to_owned())
+            .collect();
+        let current = ISSUE_SCOPES
+            .iter()
+            .position(|scope| *scope == defaults.issues)
+            .unwrap_or(1);
+        let row = combo("Issues listées par défaut", &labels, current);
+        row.set_subtitle("Pour les projets qui ne choisissent pas");
+        let sender = self.sender.clone();
+        row.connect_selected_notify(move |row| {
+            let scope = ISSUE_SCOPES[selected(row).min(ISSUE_SCOPES.len() - 1)];
+            sender.input(Msg::EditDefaults(DefaultsEdit::Issues(scope)));
+        });
+        issues.add(&row);
+
+        let prs = adw::PreferencesGroup::new();
+        prs.set_title("Pull requests");
+        let switch = |title: &str, subtitle: &str, on: bool, edit: fn(bool) -> DefaultsEdit| {
+            let row = adw::SwitchRow::new();
+            row.set_title(title);
+            row.set_subtitle(subtitle);
+            row.set_active(on);
+            let sender = self.sender.clone();
+            row.connect_active_notify(move |row| {
+                sender.input(Msg::EditDefaults(edit(row.is_active())));
+            });
+            row
+        };
+        prs.add(&switch(
+            "Les PR des autres qui me sont assignées",
+            "En plus des miennes et de celles à relire",
+            defaults.include_assigned,
+            DefaultsEdit::IncludeAssigned,
+        ));
+        prs.add(&switch(
+            "Seulement les reviews demandées à moi",
+            "Sans celles demandées à une de mes équipes",
+            defaults.direct_reviews_only,
+            DefaultsEdit::DirectReviewsOnly,
+        ));
+        let days = adw::SpinRow::with_range(1.0, 15.0, 1.0);
+        days.set_title("Une review qui attend passe en priorité 1 après");
+        days.set_subtitle("Jours ouvrés");
+        days.set_value(f64::from(defaults.review_escalation_days));
+        let sender = self.sender.clone();
+        days.connect_value_notify(move |row| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // 1 to 15.
+            let value = row.value().round() as u32;
+            sender.input(Msg::EditDefaults(DefaultsEdit::EscalationDays(value)));
+        });
+        prs.add(&days);
+
+        let general = adw::PreferencesGroup::new();
+        general.set_title("Général");
+        let labels: Vec<String> = REFRESH_CHOICES
+            .iter()
+            .map(|(_, label)| (*label).to_owned())
+            .collect();
+        let current = REFRESH_CHOICES
+            .iter()
+            .position(|(value, _)| *value == defaults.refresh)
+            .unwrap_or(1);
+        let refresh = combo("Rafraîchir toutes les", &labels, current);
+        let sender = self.sender.clone();
+        refresh.connect_selected_notify(move |row| {
+            let (value, _) = REFRESH_CHOICES[selected(row).min(REFRESH_CHOICES.len() - 1)];
+            sender.input(Msg::EditDefaults(DefaultsEdit::Refresh(value)));
+        });
+        general.add(&refresh);
+        let label = adw::EntryRow::new();
+        label.set_title("Étiquette Todoist des actions demandées par Claude");
+        label.set_text(&defaults.claude_label);
+        label.set_show_apply_button(true);
+        let sender = self.sender.clone();
+        label.connect_apply(move |entry| {
+            sender.input(Msg::EditDefaults(DefaultsEdit::ClaudeLabel(
+                entry.text().to_string(),
+            )));
+        });
+        general.add(&label);
+        vec![issues, prs, general]
+    }
+
+    /// A drop-down of `options` after a "none" entry; picking one edits project `index`.
+    fn choice_row<T: Clone + 'static>(
+        &self,
+        (title, none): (&str, &str),
+        options: Vec<(T, String)>,
+        current: Option<usize>,
+        index: usize,
+        edit: fn(Option<T>) -> Edit,
+    ) -> adw::ComboRow {
+        let mut labels = vec![none.to_owned()];
+        labels.extend(options.iter().map(|(_, label)| label.clone()));
+        let row = combo(title, &labels, current.map_or(0, |position| position + 1));
+        let values: Vec<T> = options.into_iter().map(|(value, _)| value).collect();
+        let sender = self.sender.clone();
+        row.connect_selected_notify(move |row| {
+            let value = selected(row)
+                .checked_sub(1)
+                .and_then(|position| values.get(position).cloned());
+            sender.input(Msg::EditProject(index, edit(value)));
+        });
+        row
+    }
+
     /// The repository, issues and GitHub Project of a project linked to an owner.
     fn github_rows(
         &self,
         expander: &adw::ExpanderRow,
+        config: &Config,
         choices: &Choices,
         index: usize,
         link: &GithubLink,
@@ -579,9 +849,12 @@ impl App {
             Edit::Repo,
         ));
         let issues = issue_options();
-        let current = issues.iter().position(|(scope, _)| *scope == link.issues);
+        let current = link
+            .issues
+            .and_then(|chosen| issues.iter().position(|(scope, _)| *scope == chosen));
+        let default = format!("Par défaut ({})", issue_label(config.defaults.issues));
         expander.add_row(&self.choice_row(
-            ("Issues", "Aucune"),
+            ("Issues", &default),
             issues,
             current,
             index,
@@ -607,14 +880,14 @@ impl App {
 
     fn project_editor(
         &self,
-        draft: &Config,
+        config: &Config,
         choices: &Choices,
         index: usize,
         project: &Project,
     ) -> adw::ExpanderRow {
         let expander = adw::ExpanderRow::new();
         expander.set_title(&escape(&project.name));
-        expander.set_subtitle(&escape(&summary(draft, project)));
+        expander.set_subtitle(&escape(&summary(config, project)));
         expander.add_prefix(&crate::dot(&project.color));
         expander.set_expanded(self.expanded == Some(index));
         let sender = self.sender.clone();
@@ -625,8 +898,10 @@ impl App {
         let name = adw::EntryRow::new();
         name.set_title("Nom");
         name.set_text(&project.name);
+        // Applied on Enter: drawing the page again while typing would take the focus away.
+        name.set_show_apply_button(true);
         let sender = self.sender.clone();
-        name.connect_changed(move |entry| {
+        name.connect_apply(move |entry| {
             sender.input(Msg::EditProject(
                 index,
                 Edit::Name(entry.text().to_string()),
@@ -658,7 +933,7 @@ impl App {
         ));
 
         if let Some(link) = &project.github {
-            self.github_rows(&expander, choices, index, link);
+            self.github_rows(&expander, config, choices, index, link);
         }
 
         let mut sections: Vec<((String, String), String)> = section_options(choices)
@@ -673,11 +948,11 @@ impl App {
         let mut current = project
             .todoist
             .as_ref()
-            .and_then(|link| section_index(&plain, draft, link));
+            .and_then(|link| section_index(&plain, config, link));
         if let Some(link) = &project.todoist
             && current.is_none()
         {
-            let name = todoist_project(draft, link).unwrap_or_default().to_owned();
+            let name = todoist_project(config, link).unwrap_or_default().to_owned();
             let label = format!("{name} / {}", link.section);
             sections.push(((name, link.section.clone()), label));
             current = Some(sections.len() - 1);
@@ -826,7 +1101,7 @@ mod tests {
         apply(&mut config, 0, Edit::Issues(Some(IssueScope::All)));
         let link = config.projects[0].github.as_ref().unwrap();
         assert_eq!(link.repos, ["helpers4/devcontainer"]);
-        assert_eq!(link.issues, IssueScope::All);
+        assert_eq!(link.issues, Some(IssueScope::All));
         assert_eq!(
             summary(&config, &config.projects[0]),
             "GitHub helpers4/devcontainer, toutes les issues"
@@ -835,6 +1110,6 @@ mod tests {
         apply(&mut config, 0, Edit::Issues(None));
         let link = config.projects[0].github.as_ref().unwrap();
         assert_eq!(link.repos, Vec::<String>::new());
-        assert_eq!(link.issues, IssueScope::None);
+        assert_eq!(link.issues, None);
     }
 }

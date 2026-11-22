@@ -11,6 +11,7 @@ use chrono::{DateTime, FixedOffset, Local};
 use pigeonnier_core::cache::Cache;
 use pigeonnier_core::config::Config;
 use pigeonnier_core::credentials;
+use pigeonnier_core::discover::Suggestion;
 use pigeonnier_core::engine::{Choices, Engine, connect, github_client, todoist_session_client};
 use pigeonnier_core::oauth::{CALLBACK_PORT, github_device_flow, start_todoist_login};
 use pigeonnier_core::paths;
@@ -224,14 +225,25 @@ pub async fn choices() -> Result<Choices, String> {
         .map_err(readable)
 }
 
-/// Writes the configuration and refreshes with it.
-pub async fn save_config(config: Config) -> Result<(), String> {
+/// Writes the configuration and uses it at once, from what is cached; [`refresh`] reads the
+/// services with it. Returns the suggestions that are left.
+pub async fn apply_config(config: Config, choices: Choices) -> Result<Vec<Suggestion>, String> {
     let service = service()?;
     config.save(&service.config_path).map_err(readable)?;
     service.mark_config_seen();
-    service.engine.write().await.set_config(config);
-    service.refresh.notify_one();
-    Ok(())
+    let mut engine = service.engine.write().await;
+    engine.set_config(config);
+    engine.suggestions(&choices, now()).map_err(readable)
+}
+
+/// What the settings can suggest with the configuration in use.
+pub async fn suggestions(choices: Choices) -> Result<Vec<Suggestion>, String> {
+    service()?
+        .engine
+        .read()
+        .await
+        .suggestions(&choices, now())
+        .map_err(readable)
 }
 
 /// Starts connecting GitHub: returns the code to enter and the page to enter it on, and goes on
