@@ -451,7 +451,7 @@ pub fn build(
 
 /// The groups of the pull request inbox, in the order they are shown: `(id, title, color)`. The
 /// first five wait for me.
-const INBOX: [(&str, &str, &str); 7] = [
+const INBOX: [(&str, &str, &str); 8] = [
     ("review", "À relire", "blue"),
     ("changes", "À corriger", "orange"),
     ("ci", "CI en échec", "red"),
@@ -459,12 +459,14 @@ const INBOX: [(&str, &str, &str); 7] = [
     ("merge", "Prêtes à merger", "green"),
     ("waiting", "En attente de review", "gray"),
     ("drafts", "Brouillons", "gray"),
+    ("dependencies", "Mises à jour de dépendances", "gray"),
 ];
 const INBOX_ACTIONS: usize = 5;
 
 /// The inbox group of a pull request; other items have none.
 fn inbox_group(item: &Item) -> Option<usize> {
     let id = match (item.kind, item.state) {
+        (Kind::Review | Kind::MyPr, _) if item.bot => "dependencies",
         (Kind::Review, _) => "review",
         (Kind::MyPr, State::ActionRequired(Reason::ChangesRequested)) => "changes",
         (Kind::MyPr, State::ActionRequired(Reason::CiFailed)) => "ci",
@@ -478,21 +480,20 @@ fn inbox_group(item: &Item) -> Option<usize> {
 }
 
 /// The pull requests of `items`, in their order, grouped like GitHub's inbox. Empty groups are
-/// left out; dependency updates fold in each group.
+/// left out; dependency updates make a group of their own, open like the others.
 fn inbox(items: &[&Item], now: DateTime<FixedOffset>) -> Vec<ProjectVm> {
-    let mut groups: Vec<(Vec<ItemVm>, Vec<ItemVm>)> = vec![(Vec::new(), Vec::new()); INBOX.len()];
+    let mut groups: Vec<Vec<ItemVm>> = vec![Vec::new(); INBOX.len()];
     for item in items {
         if let Some(index) = inbox_group(item) {
-            let (list, bots) = &mut groups[index];
-            if item.bot { bots } else { list }.push(item_vm(item, now));
+            groups[index].push(item_vm(item, now));
         }
     }
     INBOX
         .iter()
         .zip(groups)
         .enumerate()
-        .filter(|(_, (_, (list, bots)))| !list.is_empty() || !bots.is_empty())
-        .map(|(index, ((id, name, color), (list, bots)))| ProjectVm {
+        .filter(|(_, (_, list))| !list.is_empty())
+        .map(|(index, ((id, name, color), list))| ProjectVm {
             id: format!("inbox:{id}"),
             name: (*name).to_owned(),
             color: (*color).to_owned(),
@@ -505,7 +506,7 @@ fn inbox(items: &[&Item], now: DateTime<FixedOffset>) -> Vec<ProjectVm> {
             },
             overdue_count: 0,
             items: list,
-            bots: bot_group(bots),
+            bots: None,
         })
         .collect()
 }
@@ -864,9 +865,9 @@ mod tests {
                 ("inbox:ci", vec!["ci"]),
                 ("inbox:waiting", vec!["waiting"]),
                 ("inbox:drafts", vec!["draft"]),
+                ("inbox:dependencies", vec!["bot"]),
             ]
         );
-        assert_eq!(snapshot.inbox[0].bots.as_ref().unwrap().items[0].id, "bot");
         assert_eq!(
             snapshot.inbox[3].items[0].state_label.as_deref(),
             Some("brouillon")
