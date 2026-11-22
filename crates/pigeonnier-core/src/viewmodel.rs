@@ -89,7 +89,8 @@ pub struct ItemVm {
     /// `overdue`, `today`, `soon` or `later`.
     pub due_urgency: Option<String>,
     pub state_label: Option<String>,
-    pub waiting: bool,
+    /// Shown dimmed: a draft pull request, not ready for anyone yet.
+    pub dimmed: bool,
     pub action_required: bool,
     pub actions: Vec<String>,
     /// What unfolding the item shows; `None` for an item that only opens its page.
@@ -344,7 +345,7 @@ fn item_vm(item: &Item, now: DateTime<FixedOffset>) -> ItemVm {
         due_label: due_label(item, now),
         due_urgency: due_urgency(item, now),
         state_label: state_label(item, now),
-        waiting: item.state == State::Waiting,
+        dimmed: item.draft,
         action_required: matches!(item.state, State::ActionRequired(_)),
         actions,
         details: item
