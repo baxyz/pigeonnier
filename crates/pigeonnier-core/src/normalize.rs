@@ -265,6 +265,7 @@ pub fn pull_request(raw: &RawItem, kind: Kind, context: &Context<'_>) -> Item {
         bot,
         snoozed_until: None,
         details: None,
+        draft: record.fields.get("draft") == Some(&Value::Bool(true)),
         provenance: record.provenance,
     }
 }
@@ -323,6 +324,7 @@ pub fn github_issue(raw: &RawItem, context: &Context<'_>) -> Option<Item> {
         bot: false,
         snoozed_until: None,
         details: None,
+        draft: false,
         provenance: record.provenance,
     })
 }
@@ -402,6 +404,7 @@ pub fn roadmap_item(raw: &RawItem, project: &Project, context: &Context<'_>) -> 
         bot: false,
         snoozed_until: None,
         details: None,
+        draft: false,
         provenance: record.provenance,
     })
 }
@@ -502,6 +505,7 @@ pub fn todoist_item(raw: &RawItem, sync: &SyncState, context: &Context<'_>) -> O
         bot: false,
         snoozed_until: None,
         details: Some(details),
+        draft: false,
         provenance: record.provenance,
     })
 }
