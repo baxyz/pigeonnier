@@ -350,8 +350,8 @@ impl App {
             flag(item).upcast(),
             gtk::Image::from_icon_name(&item.icon).upcast(),
         ]);
-        if item.waiting {
-            row.add_css_class("waiting");
+        if item.dimmed {
+            row.add_css_class("dimmed");
         }
         if self.compact {
             let parts = [
