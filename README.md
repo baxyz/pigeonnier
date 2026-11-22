@@ -33,17 +33,22 @@ among the applications.
 
 ## First run
 
-The window opens on a welcome page:
+The window opens on a welcome page; **Configurer Pigeonnier** opens the preferences:
 
-1. **Connecter** GitHub: the window shows a code; **Copier et ouvrir GitHub** copies it and opens
-   the page to paste it on.
-2. **Connecter** Todoist: the browser opens on Todoist; authorize, and that is all.
-3. Pigeonnier proposes one project per GitHub account and organization, paired with the Todoist
-   section of the same name. Open a project to change its name, narrow it to one repository, choose
-   its issues (mine, all or none), its GitHub Project or its Todoist section, then **Enregistrer**.
+1. **Comptes**: **Connecter** GitHub shows a code, and **Copier et ouvrir GitHub** copies it and
+   opens the page to paste it on. **Connecter** Todoist opens the browser; authorize, and that is
+   all.
+2. **Projets**: **Proposer mes projets** makes one project per GitHub account and organization,
+   paired with the Todoist section of the same name. Open a project to change its name (Enter to
+   apply), narrow it to one repository, choose its issues, its GitHub Project or its Todoist section.
+   Suggestions offer the projects and links that are missing, from what the accounts see and what
+   lands in "Autres"; each can be applied or ignored.
+3. **Application**: the issues listed by default, which pull requests to list, when a waiting
+   review becomes urgent, how often to refresh.
 
-The settings button in the header bar brings this page back later. Tokens stay in the system
-keyring.
+Every change applies at once; the list behind follows, and the services are read again when the
+preferences close. Replacing or removing projects can be undone from the message that appears.
+The main menu (or `Ctrl+,`) brings the preferences back later. Tokens stay in the system keyring.
 
 ## Use
 
