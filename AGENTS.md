@@ -39,7 +39,7 @@ pigeonnier/
                          source/ → map → normalize → filter → sort, with view and viewmodel;
                          engine is the one interface the app talks to
   apps/gnome/          ← the app (Relm4, libadwaita): service.rs runs the engine in the background,
-                         settings.rs is the accounts and projects page
+                         settings.rs is the preferences dialog (projects, accounts, app)
   packaging/           ← build-flatpak.sh, the desktop file, the metainfo and the icon
   docs/spec.md         ← the goal and the milestones
 ```
