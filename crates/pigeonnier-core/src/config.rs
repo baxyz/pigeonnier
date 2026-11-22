@@ -39,6 +39,9 @@ pub struct Config {
     pub notifications: Notifications,
     #[serde(default, rename = "project")]
     pub projects: Vec<Project>,
+    /// The suggestions the person chose to ignore, by key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_suggestions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +55,8 @@ pub struct Defaults {
     pub include_assigned: bool,
     /// Leaves out review requests made to a team I am in.
     pub direct_reviews_only: bool,
+    /// The issues a project lists when it does not choose.
+    pub issues: IssueScope,
 }
 
 impl Default for Defaults {
@@ -63,6 +68,7 @@ impl Default for Defaults {
             review_escalation_days: 2,
             include_assigned: false,
             direct_reviews_only: false,
+            issues: IssueScope::default(),
         }
     }
 }
@@ -150,8 +156,9 @@ pub struct GithubLink {
     /// project of the whole owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
-    #[serde(default, skip_serializing_if = "IssueScope::is_default")]
-    pub issues: IssueScope,
+    /// `None` follows `defaults.issues`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issues: Option<IssueScope>,
 }
 
 impl GithubLink {
@@ -162,7 +169,7 @@ impl GithubLink {
             owner,
             project: None,
             repos: Vec::new(),
-            issues: IssueScope::default(),
+            issues: None,
         }
     }
 }
@@ -177,10 +184,11 @@ pub enum IssueScope {
     All,
 }
 
-impl IssueScope {
-    #[allow(clippy::trivially_copy_pass_by_ref)] // The signature serde's `skip_serializing_if` wants.
-    fn is_default(&self) -> bool {
-        *self == Self::default()
+impl Config {
+    /// The issues a project lists: its own choice, or the default one.
+    #[must_use]
+    pub fn issue_scope(&self, link: &GithubLink) -> IssueScope {
+        link.issues.unwrap_or(self.defaults.issues)
     }
 }
 
@@ -304,7 +312,7 @@ impl Config {
         match self
             .project_for_repo(owner, repo, me)
             .and_then(|project| project.github.as_ref())
-            .map(|link| link.issues)
+            .map(|link| self.issue_scope(link))
         {
             Some(IssueScope::All) => true,
             Some(IssueScope::Assigned) | None => assigned_to_me,
@@ -422,10 +430,13 @@ done_values = ["Fini"]
         assert!(!lists("quiet", "quiet/x", true));
         assert!(lists("nobody", "nobody/x", true));
         assert!(!lists("nobody", "nobody/x", false));
-        // The default choice is not written back.
+        // A project that does not choose is not written with a choice.
         let text = config.to_toml().unwrap();
         assert!(text.contains("issues = \"all\""));
-        assert_eq!(text.matches("issues =").count(), 2);
+        assert_eq!(text.matches("issues =").count(), 3);
+        let mut everything = config.clone();
+        everything.defaults.issues = IssueScope::All;
+        assert!(everything.lists_issue("acme", "acme/tool", "me", false));
     }
 
     #[test]

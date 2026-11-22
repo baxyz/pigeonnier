@@ -77,6 +77,7 @@ pub fn propose(owners: &[Owner], sections: &[String], parent: Option<&str>) -> C
         },
         notifications: Notifications::default(),
         projects,
+        ignored_suggestions: Vec::new(),
     }
 }
 
