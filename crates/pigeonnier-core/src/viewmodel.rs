@@ -22,6 +22,10 @@ pub struct Snapshot {
     pub view: String,
     pub views: Vec<ViewChoice>,
     pub projects: Vec<ProjectVm>,
+    /// The pull request inbox: the same pull requests, grouped by what each one waits for.
+    pub inbox: Vec<ProjectVm>,
+    /// The pull requests of the inbox that wait for me.
+    pub inbox_count: u32,
     pub badge: Badge,
     pub issues: Vec<Issue>,
     pub refreshed_at: Option<DateTime<Utc>>,
@@ -295,6 +299,7 @@ fn state_label(item: &Item, now: DateTime<FixedOffset>) -> Option<String> {
         State::ActionRequired(Reason::CiFailed) => Some("CI rouge".to_owned()),
         State::ActionRequired(Reason::Conflicts) => Some("conflits".to_owned()),
         State::ActionRequired(Reason::ToMerge) => Some("à merger".to_owned()),
+        State::Waiting if item.draft => Some("brouillon".to_owned()),
         State::Waiting => Some("en attente".to_owned()),
         State::Planned => None,
     }
@@ -369,11 +374,14 @@ pub fn build(
     let kept = view.map_or_else(Vec::new, |view| view.run(records).kept);
     let by_id: HashMap<&str, &Item> = items.iter().map(|item| (item.id.as_str(), item)).collect();
 
+    let shown: Vec<&Item> = kept
+        .iter()
+        .filter_map(|record| by_id.get(record.provenance.id.as_str()).copied())
+        .collect();
+    let inbox = inbox(&shown, now);
+    let inbox_count = inbox.iter().map(|group| group.action_count).sum();
     let mut groups: HashMap<&str, (Vec<ItemVm>, Vec<ItemVm>)> = HashMap::new();
-    for record in &kept {
-        let Some(item) = by_id.get(record.provenance.id.as_str()) else {
-            continue;
-        };
+    for item in shown {
         let group = groups.entry(item.project.as_str()).or_default();
         let list = if item.bot { &mut group.1 } else { &mut group.0 };
         list.push(item_vm(item, now));
@@ -434,9 +442,72 @@ pub fn build(
             .collect(),
         badge: badge(items, config, now),
         projects,
+        inbox,
+        inbox_count,
         issues,
         refreshed_at,
     }
+}
+
+/// The groups of the pull request inbox, in the order they are shown: `(id, title, color)`. The
+/// first five wait for me.
+const INBOX: [(&str, &str, &str); 7] = [
+    ("review", "À relire", "blue"),
+    ("changes", "À corriger", "orange"),
+    ("ci", "CI en échec", "red"),
+    ("conflicts", "Conflits", "red"),
+    ("merge", "Prêtes à merger", "green"),
+    ("waiting", "En attente de review", "gray"),
+    ("drafts", "Brouillons", "gray"),
+];
+const INBOX_ACTIONS: usize = 5;
+
+/// The inbox group of a pull request; other items have none.
+fn inbox_group(item: &Item) -> Option<usize> {
+    let id = match (item.kind, item.state) {
+        (Kind::Review, _) => "review",
+        (Kind::MyPr, State::ActionRequired(Reason::ChangesRequested)) => "changes",
+        (Kind::MyPr, State::ActionRequired(Reason::CiFailed)) => "ci",
+        (Kind::MyPr, State::ActionRequired(Reason::Conflicts)) => "conflicts",
+        (Kind::MyPr, State::ActionRequired(Reason::ToMerge)) => "merge",
+        (Kind::MyPr, _) if item.draft => "drafts",
+        (Kind::MyPr, _) => "waiting",
+        _ => return None,
+    };
+    INBOX.iter().position(|(known, _, _)| *known == id)
+}
+
+/// The pull requests of `items`, in their order, grouped like GitHub's inbox. Empty groups are
+/// left out; dependency updates fold in each group.
+fn inbox(items: &[&Item], now: DateTime<FixedOffset>) -> Vec<ProjectVm> {
+    let mut groups: Vec<(Vec<ItemVm>, Vec<ItemVm>)> = vec![(Vec::new(), Vec::new()); INBOX.len()];
+    for item in items {
+        if let Some(index) = inbox_group(item) {
+            let (list, bots) = &mut groups[index];
+            if item.bot { bots } else { list }.push(item_vm(item, now));
+        }
+    }
+    INBOX
+        .iter()
+        .zip(groups)
+        .enumerate()
+        .filter(|(_, (_, (list, bots)))| !list.is_empty() || !bots.is_empty())
+        .map(|(index, ((id, name, color), (list, bots)))| ProjectVm {
+            id: format!("inbox:{id}"),
+            name: (*name).to_owned(),
+            color: (*color).to_owned(),
+            pinned: false,
+            collapsed: false,
+            action_count: if index < INBOX_ACTIONS {
+                u32::try_from(list.len()).unwrap_or(u32::MAX)
+            } else {
+                0
+            },
+            overdue_count: 0,
+            items: list,
+            bots: bot_group(bots),
+        })
+        .collect()
 }
 
 fn count<'a>(items: impl Iterator<Item = &'a Item>) -> u32 {
@@ -505,6 +576,7 @@ mod tests {
             bot: false,
             snoozed_until: None,
             details: None,
+            draft: false,
             provenance: Provenance {
                 source: "test",
                 id: id.to_owned(),
@@ -748,5 +820,58 @@ mod tests {
         assert_eq!(size_text(512), "512 o");
         assert_eq!(size_text(48_000), "48 ko");
         assert_eq!(size_text(2_500_000), "2.5 Mo");
+    }
+
+    #[test]
+    fn the_inbox_groups_pull_requests_by_what_they_wait_for() {
+        let pr = |id: &str, kind: Kind, state: State| {
+            let mut item = item(id, "a");
+            item.kind = kind;
+            item.state = state;
+            item
+        };
+        let mut draft = pr("draft", Kind::MyPr, State::Waiting);
+        draft.draft = true;
+        let mut bot = pr("bot", Kind::Review, State::ActionRequired(Reason::ToReview));
+        bot.bot = true;
+        let items = [
+            pr(
+                "review",
+                Kind::Review,
+                State::ActionRequired(Reason::ToReview),
+            ),
+            pr("ci", Kind::MyPr, State::ActionRequired(Reason::CiFailed)),
+            pr("waiting", Kind::MyPr, State::Waiting),
+            draft,
+            bot,
+            item("task", "a"),
+        ];
+
+        let snapshot = snapshot(&items, "all");
+
+        let groups: Vec<(&str, Vec<&str>)> = snapshot
+            .inbox
+            .iter()
+            .map(|group| {
+                let ids = group.items.iter().map(|item| item.id.as_str()).collect();
+                (group.id.as_str(), ids)
+            })
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("inbox:review", vec!["review"]),
+                ("inbox:ci", vec!["ci"]),
+                ("inbox:waiting", vec!["waiting"]),
+                ("inbox:drafts", vec!["draft"]),
+            ]
+        );
+        assert_eq!(snapshot.inbox[0].bots.as_ref().unwrap().items[0].id, "bot");
+        assert_eq!(
+            snapshot.inbox[3].items[0].state_label.as_deref(),
+            Some("brouillon")
+        );
+        // What waits for me: the review and the failing CI, not my pull requests waiting for others.
+        assert_eq!(snapshot.inbox_count, 2);
     }
 }

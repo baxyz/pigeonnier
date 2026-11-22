@@ -133,6 +133,8 @@ pub struct Item {
     pub bot: bool,
     pub snoozed_until: Option<DateTime<Utc>>,
     pub details: Option<Details>,
+    /// A pull request not ready for review yet.
+    pub draft: bool,
     pub provenance: Provenance,
 }
 
