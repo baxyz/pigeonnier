@@ -410,6 +410,23 @@ impl Engine {
         Ok(items)
     }
 
+    /// What the settings can suggest, from the configuration in use and what lands in "Autres".
+    ///
+    /// # Errors
+    /// A cache failure.
+    pub fn suggestions(
+        &self,
+        choices: &Choices,
+        now: DateTime<FixedOffset>,
+    ) -> Result<Vec<discover::Suggestion>, CacheError> {
+        Ok(discover::suggestions(
+            &self.config,
+            &choices.owners,
+            &choices.todoist,
+            &self.items(now)?,
+        ))
+    }
+
     /// What a UI draws for a view.
     ///
     /// # Errors
