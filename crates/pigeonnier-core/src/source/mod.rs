@@ -53,6 +53,9 @@ fn status_text(status: u16, body: &str) -> String {
     }
 }
 
+/// The characters of an error body worth showing.
+const BODY_LIMIT: usize = 300;
+
 /// What to keep of an error body: nothing of an HTML page, the first few hundred characters of the
 /// rest.
 fn summarize(body: &str) -> String {
@@ -61,9 +64,8 @@ fn summarize(body: &str) -> String {
     if start.starts_with("<!doctype") || start.starts_with("<html") {
         return String::new();
     }
-    const LIMIT: usize = 300;
-    if body.chars().count() > LIMIT {
-        let cut: String = body.chars().take(LIMIT).collect();
+    if body.chars().count() > BODY_LIMIT {
+        let cut: String = body.chars().take(BODY_LIMIT).collect();
         format!("{cut}…")
     } else {
         body.to_owned()
