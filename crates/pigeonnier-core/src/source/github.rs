@@ -3,6 +3,7 @@
 //! GitHub GraphQL: pull request search, Projects v2 and the discovery of owners.
 
 use std::process::Command;
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
@@ -12,6 +13,9 @@ const ENDPOINT: &str = "https://api.github.com/graphql";
 const SOURCE_PR: &str = "github:pull_request";
 const SOURCE_PROJECT_ITEM: &str = "github:project_item";
 const SOURCE_ISSUE: &str = "github:issue";
+/// Items asked for in a page, then fewer when GitHub times out on a heavy query.
+const PAGE: u32 = 100;
+const SMALLEST_PAGE: u32 = 25;
 
 const ISSUE_FIELDS: &str = "
     id number title url updatedAt createdAt
@@ -32,12 +36,12 @@ const PR_FIELDS: &str = "
     }";
 
 const PROJECT_QUERY: &str = "
-query($owner: String!, $number: Int!, $after: String) {
+query($owner: String!, $number: Int!, $after: String, $first: Int!) {
   repositoryOwner(login: $owner) {
     ... on ProjectV2Owner {
       projectV2(number: $number) {
         id title closed
-        items(first: 100, after: $after) {
+        items(first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
           nodes {
             id isArchived updatedAt type
@@ -103,6 +107,8 @@ pub struct GithubClient {
     http: reqwest::Client,
     token: String,
     endpoint: String,
+    /// The wait before asking again after a transient failure.
+    retry_delay: Duration,
 }
 
 impl GithubClient {
@@ -117,7 +123,15 @@ impl GithubClient {
             http: reqwest::Client::new(),
             token,
             endpoint,
+            retry_delay: Duration::from_secs(2),
         }
+    }
+
+    /// Asks again at once after a transient failure, for tests.
+    #[must_use]
+    pub fn without_retry_delay(mut self) -> Self {
+        self.retry_delay = Duration::ZERO;
+        self
     }
 
     /// The token of `gh auth token`.
@@ -139,10 +153,25 @@ impl GithubClient {
     }
 
     /// Runs one query and returns `data` with the errors GitHub reported next to it.
+    /// Runs one query, and asks once more after a transient failure.
     async fn request(
         &self,
         query: &str,
         variables: Value,
+    ) -> Result<(Value, Vec<Value>), SourceError> {
+        match self.request_once(query, &variables).await {
+            Err(error) if error.is_transient() => {
+                tokio::time::sleep(self.retry_delay).await;
+                self.request_once(query, &variables).await
+            }
+            result => result,
+        }
+    }
+
+    async fn request_once(
+        &self,
+        query: &str,
+        variables: &Value,
     ) -> Result<(Value, Vec<Value>), SourceError> {
         let response = self
             .http
@@ -197,8 +226,8 @@ impl GithubClient {
 
     async fn search(&self, search: &str, nodes: &str) -> Result<Vec<Value>, SourceError> {
         let query = format!(
-            "query($q: String!, $after: String) {{
-               search(type: ISSUE, first: 100, query: $q, after: $after) {{
+            "query($q: String!, $after: String, $first: Int!) {{
+               search(type: ISSUE, first: $first, query: $q, after: $after) {{
                  pageInfo {{ hasNextPage endCursor }}
                  nodes {{ {nodes} }}
                }}
@@ -206,9 +235,16 @@ impl GithubClient {
         );
         let mut items = Vec::new();
         let mut after = Value::Null;
+        let mut first = PAGE;
         loop {
-            let variables = json!({ "q": search, "after": after });
-            let (data, errors) = self.request(&query, variables).await?;
+            let variables = json!({ "q": search, "after": after, "first": first });
+            let (data, errors) = match self.request(&query, variables).await {
+                Err(error) if error.is_transient() && first > SMALLEST_PAGE => {
+                    first /= 2;
+                    continue;
+                }
+                result => result?,
+            };
             if !errors.is_empty() {
                 return Err(SourceError::GraphQl(error_messages(&errors)));
             }
@@ -228,9 +264,17 @@ impl GithubClient {
     pub async fn read_project(&self, owner: &str, number: u32) -> Result<ProjectRead, SourceError> {
         let mut items = Vec::new();
         let mut after = Value::Null;
+        let mut first = PAGE;
         loop {
-            let variables = json!({ "owner": owner, "number": number, "after": after });
-            let (data, errors) = self.request(PROJECT_QUERY, variables).await?;
+            let variables =
+                json!({ "owner": owner, "number": number, "after": after, "first": first });
+            let (data, errors) = match self.request(PROJECT_QUERY, variables).await {
+                Err(error) if error.is_transient() && first > SMALLEST_PAGE => {
+                    first /= 2;
+                    continue;
+                }
+                result => result?,
+            };
             if errors.iter().any(|error| error["type"] == "NOT_FOUND") {
                 return Ok(ProjectRead::NotFound);
             }
