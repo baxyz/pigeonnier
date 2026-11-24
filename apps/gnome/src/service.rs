@@ -15,6 +15,7 @@ use pigeonnier_core::discover::Suggestion;
 use pigeonnier_core::engine::{Choices, Engine, connect, github_client, todoist_session_client};
 use pigeonnier_core::oauth::{CALLBACK_PORT, github_device_flow, start_todoist_login};
 use pigeonnier_core::paths;
+use pigeonnier_core::query::{Query, ViewSpec};
 use pigeonnier_core::viewmodel::{CommentVm, Snapshot, comments_vm};
 use pigeonnier_core::when::parse_until;
 use tokio::sync::{Notify, RwLock};
@@ -156,10 +157,50 @@ pub fn refresh() {
     }
 }
 
-pub async fn load(view: &str) -> Result<Snapshot, String> {
+pub async fn load(spec: &ViewSpec) -> Result<Snapshot, String> {
     let service = service()?;
     let engine = service.engine.read().await;
-    engine.snapshot(view, now()).map_err(readable)
+    engine.snapshot(spec, now()).map_err(readable)
+}
+
+/// Reads a typed query with the projects of the configuration in use.
+pub async fn parse_query(text: &str) -> Result<Query, String> {
+    Ok(Query::parse(text, service()?.engine.read().await.config()))
+}
+
+/// Writes a changed configuration and uses it at once.
+async fn change_config(change: impl FnOnce(&mut Config)) -> Result<(), String> {
+    let service = service()?;
+    let mut engine = service.engine.write().await;
+    let mut config = engine.config().clone();
+    change(&mut config);
+    config.save(&service.config_path).map_err(readable)?;
+    service.mark_config_seen();
+    engine.set_config(config);
+    Ok(())
+}
+
+/// Saves a view under `name`, in place of the one with the same name. Returns its sidebar entry.
+pub async fn save_view(spec: ViewSpec, name: &str) -> Result<String, String> {
+    let saved = spec.to_saved(name.trim());
+    if saved.id.is_empty() {
+        return Err("Donne un nom à la vue".to_owned());
+    }
+    let entry = format!("saved:{}", saved.id);
+    change_config(
+        |config| match config.views.iter_mut().find(|known| known.id == saved.id) {
+            Some(known) => *known = saved,
+            None => config.views.push(saved),
+        },
+    )
+    .await?;
+    Ok(entry)
+}
+
+/// Removes a saved view, by its sidebar entry.
+pub async fn delete_view(entry: &str) -> Result<(), String> {
+    let id = entry.strip_prefix("saved:").unwrap_or(entry).to_owned();
+    change_config(|config| config.views.retain(|view| view.id != id)).await
 }
 
 pub async fn complete(item_id: &str) -> Result<(), String> {
