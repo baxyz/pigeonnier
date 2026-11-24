@@ -1,58 +1,93 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Draws what the engine prepares and sends actions back. The narrow layout is the sidebar: it is a
-//! breakpoint of this one window, not a second window to maintain.
+//! Draws what the engine prepares and sends actions back. One window, three panes: the sidebar of
+//! saved filters, the list with its filter bar, and the detail of the selected item. The home page
+//! and the focus mode are two ways of using the same window; the narrow layouts are breakpoints of
+//! it, not other windows to maintain.
 
+mod detail;
+mod home;
+mod list;
 mod markdown;
 mod service;
 mod settings;
+mod sidebar;
+mod widgets;
 
-use std::collections::{HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use pigeonnier_core::config::Config;
 use pigeonnier_core::discover::Suggestion;
 use pigeonnier_core::engine::Choices;
-use pigeonnier_core::viewmodel::{CommentVm, DetailsVm, ItemVm, ProjectVm, Snapshot};
+use pigeonnier_core::query::{Field, Filter, GroupBy, Query, SortBy, ViewSpec};
+use pigeonnier_core::viewmodel::{CommentVm, Entry, Group, ItemVm, Snapshot};
 use relm4::adw::prelude::*;
 use relm4::{ComponentParts, ComponentSender, RelmApp, SimpleComponent, adw, gtk};
 
 use crate::settings::{DefaultsEdit, Edit};
+pub(crate) use crate::widgets::{dot, escape};
 
 const APP_ID: &str = "io.github.baxyz.Pigeonnier";
 const SIDEBAR_SIZE: (i32, i32) = (340, 900);
-/// The sidebar entry of the pull request inbox, beside the projects' identifiers.
-const INBOX: &str = "@inbox";
+const FULL_SIZE: (i32, i32) = (1200, 780);
+/// The sidebar entry of the home page, beside the entries of the views and the projects.
+const HOME: &str = "home";
+/// The entry "Commencer" opens: what waits for me.
+const START: &str = "view:action";
 
-/// What stands before a sidebar entry.
-enum Mark<'a> {
-    Dot(&'a str),
-    Icon(&'a str),
-    /// The colors of the projects, for the entry that shows them all.
-    Colors(Vec<&'a str>),
+/// How much room the window has: three panes, the list and the detail, or one pane at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    Wide,
+    Medium,
+    Narrow,
 }
-const FULL_SIZE: (i32, i32) = (1100, 760);
 
 #[derive(Debug)]
 enum Msg {
     Load,
     Loaded(Result<Snapshot, String>),
     Refresh,
-    SetView(String),
-    SelectProject(Option<String>),
+    /// A sidebar entry was chosen: the home page, a view or a project.
+    SelectEntry(String),
+    /// Opens a list that the home page points to, under the entry it belongs to.
+    OpenSpec(ViewSpec),
+    /// Opens the project of an item with that item selected.
+    Reveal(String, String),
+    /// Opens what waits for me on its first item, in focus mode.
+    Start,
+    Select(String),
+    /// An item was clicked: in a narrow window, its detail takes the place of the list.
+    Show(String),
+    Step(i32),
+    Focus(bool),
+    SetFilters(Vec<Filter>),
+    RemoveFilter(Field),
+    SetType(Option<String>),
+    SetGroup(usize, Option<GroupBy>),
+    SetSort(SortBy),
+    SetSnoozed(bool),
+    /// The filter entry changed; `true` when Enter was pressed, which turns typed filters into
+    /// tokens.
+    QueryText(String, bool),
+    QueryParsed(Query, bool),
+    ResetSpec,
+    AskSaveView,
+    SaveView(String),
+    ViewSaved(Result<String, String>),
+    DeleteView,
     Open(String),
-    /// A task was unfolded; `true` when it has comments to read.
-    Unfold(String, bool),
-    Fold(String),
+    CopyLink(String),
     Comments(String, Result<Vec<CommentVm>, String>),
     Complete(String),
     Snooze(String, &'static str),
     ActionDone(Result<(), String>),
     Key(char),
-    Compact(bool),
+    Layout(Layout),
     AskMerge(String, String),
     Merge(String),
     QuickAdd(String),
-    Search(String),
     Failed(String),
     /// Opens the preferences, on a page if given.
     ShowPreferences(Option<&'static str>),
@@ -78,18 +113,77 @@ enum Msg {
     Expanded(usize, bool),
 }
 
+/// The heading drawn above the first row of a group.
+#[derive(Debug, Clone)]
+struct Heading {
+    /// The heading of the first level, when the group opens it.
+    above: Option<String>,
+    title: String,
+    color: Option<String>,
+    count: usize,
+}
+
+/// The controls that choose how the list is laid out. They are built once: a change must not close
+/// the popover they live in.
+struct Display {
+    button: gtk::MenuButton,
+    groups: [gtk::DropDown; 2],
+    sort: gtk::DropDown,
+    snoozed: gtk::Switch,
+    remove: gtk::Button,
+    /// Set while the controls are filled from the view, so that filling them changes nothing.
+    syncing: Rc<Cell<bool>>,
+}
+
 struct App {
     window: adw::ApplicationWindow,
-    split: adw::NavigationSplitView,
+    /// The sidebar beside everything else.
+    outer: adw::NavigationSplitView,
+    /// The list beside the detail.
+    inner: adw::NavigationSplitView,
+    /// The welcome page, the home page or the list with its detail.
+    stack: gtk::Stack,
     banner: adw::Banner,
-    header: adw::HeaderBar,
-    views_bar: gtk::CenterBox,
-    views: gtk::Box,
-    compact: bool,
-    search_bar: gtk::SearchBar,
-    search_entry: gtk::SearchEntry,
-    search: String,
+    sidebar: gtk::ListBox,
+    welcome: gtk::Box,
+    home: gtk::Box,
+    home_start: gtk::Button,
+    list_title: adw::WindowTitle,
+    tokens: adw::WrapBox,
+    types: gtk::Box,
+    query_entry: gtk::SearchEntry,
+    display: Display,
+    save: gtk::Button,
+    reset: gtk::Button,
+    list: gtk::ListBox,
+    headings: Rc<RefCell<Vec<Option<Heading>>>>,
     quick: gtk::Entry,
+    detail_title: adw::WindowTitle,
+    detail_header: adw::HeaderBar,
+    detail: gtk::Box,
+    actions: adw::WrapBox,
+    unfocus: gtk::Button,
+    focus_button: gtk::Button,
+    step_buttons: [gtk::Button; 2],
+    layout: Layout,
+    focus: bool,
+    /// The same, for the key handler that runs before the panes.
+    focused: Rc<Cell<bool>>,
+    /// The sidebar entry in use, and the view shown, which the filter bar may have changed.
+    entry: String,
+    spec: ViewSpec,
+    snapshot: Option<Snapshot>,
+    /// The rows of the list, in their order, and the groups they were drawn from.
+    order: Vec<ItemVm>,
+    drawn_groups: Option<Vec<Group>>,
+    /// What the filter bar was last drawn from: drawing it again would close an open menu.
+    drawn_filters: Option<String>,
+    selected: Option<String>,
+    /// Where the selection was, to stay there when the selected item leaves the list.
+    selected_index: usize,
+    /// The comments read for the selected task, and where to show them.
+    comments: Option<(String, Result<Vec<CommentVm>, String>)>,
+    comment_box: Option<(String, gtk::Box)>,
     preferences: Option<settings::Preferences>,
     /// The configuration being edited in the preferences; every change is written at once.
     config: Option<Config>,
@@ -101,547 +195,99 @@ struct App {
     loading_choices: bool,
     /// The project open in the preferences, kept open when they are drawn again.
     expanded: Option<usize>,
-    projects: gtk::ListBox,
-    list: gtk::Box,
-    view: String,
-    project: Option<String>,
-    snapshot: Option<Snapshot>,
-    rows: Vec<(adw::PreferencesRow, ItemVm)>,
-    focused: Option<usize>,
-    /// The tasks unfolded, kept unfolded when the list is drawn again.
-    unfolded: HashSet<String>,
-    /// The comments read for each unfolded task, and where to show them.
-    comments: HashMap<String, Result<Vec<CommentVm>, String>>,
-    comment_boxes: HashMap<String, gtk::Box>,
     sender: ComponentSender<App>,
 }
 
-fn dot_color(color: &str) -> &str {
-    match color {
-        "blue" => "#3584e4",
-        "green" => "#2ec27e",
-        "yellow" => "#e5a50a",
-        "orange" => "#ff7800",
-        "red" => "#e01b24",
-        "purple" => "#9141ac",
-        "brown" => "#986a44",
-        "gray" => "#77767b",
-        other => other,
-    }
-}
-
-pub(crate) fn escape(text: &str) -> String {
-    gtk::glib::markup_escape_text(text).to_string()
-}
-
-/// Four small dots in the colors of the first projects: all of them.
-fn all_mark(colors: &[&str]) -> gtk::Grid {
-    const FALLBACK: [&str; 4] = ["blue", "green", "orange", "purple"];
-    let grid = gtk::Grid::new();
-    grid.set_valign(gtk::Align::Center);
-    let chosen = colors.iter().copied().chain(FALLBACK).take(4);
-    for (index, color) in (0..).zip(chosen) {
-        let label = gtk::Label::new(None);
-        label.set_markup(&format!(
-            "<span foreground=\"{}\">●</span>",
-            escape(dot_color(color))
-        ));
-        label.add_css_class("project-dot-small");
-        grid.attach(&label, index % 2, index / 2, 1, 1);
-    }
-    grid
-}
-
-pub(crate) fn dot(color: &str) -> gtk::Label {
-    let label = gtk::Label::new(None);
-    label.set_markup(&format!(
-        "<span foreground=\"{}\">●</span>",
-        escape(dot_color(color))
-    ));
-    label.add_css_class("project-dot");
-    label
-}
-
-fn flag(item: &ItemVm) -> gtk::Label {
-    let label = gtk::Label::new(Some(&item.priority));
-    let color = item.flag_color.as_deref().unwrap_or("none");
-    label.add_css_class("flag");
-    label.add_css_class(&format!("flag-{color}"));
-    label.set_tooltip_text(Some(&item.flag_label));
-    label.update_property(&[gtk::accessible::Property::Label(&item.flag_label)]);
-    label
-}
-
-fn due(item: &ItemVm) -> Option<gtk::Label> {
-    let label = gtk::Label::new(Some(item.due_label.as_deref()?));
-    label.add_css_class("caption");
-    label.add_css_class(match item.due_urgency.as_deref() {
-        Some("overdue") => "error",
-        Some("today") => "warning",
-        Some("soon") => "heading",
-        _ => "dim-label",
-    });
-    Some(label)
-}
-
-fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
-    let button = gtk::Button::from_icon_name(icon);
-    button.add_css_class("flat");
-    button.set_valign(gtk::Align::Center);
-    button.set_tooltip_text(Some(tooltip));
-    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
-    button
-}
-
-fn text_label(text: &str) -> gtk::Label {
-    let label = gtk::Label::new(Some(text));
-    label.set_xalign(0.0);
-    label.set_wrap(true);
-    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    label
-}
-
-fn markdown_label(markdown: &str) -> gtk::Label {
-    let label = text_label("");
-    label.set_markup(&markdown::to_pango(markdown));
-    label.set_selectable(true);
-    label
-}
-
-/// Shows comments, or that they are being read (`Err` with no message), or why they could not be.
-fn fill_comments(target: &gtk::Box, comments: &Result<Vec<CommentVm>, String>) {
-    while let Some(child) = target.first_child() {
-        target.remove(&child);
-    }
-    let note = |text: &str| {
-        let label = text_label(text);
-        label.add_css_class("dim-label");
-        target.append(&label);
-    };
-    match comments {
-        Err(error) if error.is_empty() => note("Lecture des commentaires…"),
-        Err(error) => note(&format!("Les commentaires n'ont pas pu être lus : {error}")),
-        Ok(comments) if comments.is_empty() => note("Aucun commentaire"),
-        Ok(comments) => {
-            for comment in comments {
-                let block = gtk::Box::new(gtk::Orientation::Vertical, 4);
-                if let Some(posted) = &comment.posted {
-                    let when = text_label(posted);
-                    when.add_css_class("caption");
-                    when.add_css_class("dim-label");
-                    block.append(&when);
-                }
-                if !comment.text.trim().is_empty() {
-                    block.append(&markdown_label(&comment.text));
-                }
-                if let Some(file) = &comment.attachment {
-                    let text = match &file.size {
-                        Some(size) => format!("📎 {} ({size})", file.name),
-                        None => format!("📎 {}", file.name),
-                    };
-                    let link = gtk::LinkButton::with_label(&file.url, &text);
-                    link.set_halign(gtk::Align::Start);
-                    block.append(&link);
-                }
-                block.add_css_class("comment");
-                target.append(&block);
-            }
-        }
-    }
-}
-
 impl App {
-    /// A row that unfolds when the item has details, and opens its page otherwise.
-    fn item_row(&mut self, item: &ItemVm) -> adw::PreferencesRow {
-        let Some(details) = &item.details else {
-            let row = adw::ActionRow::new();
-            row.set_activatable(true);
-            self.fill_row(&row, item);
-            let (sender, url) = (self.sender.clone(), item.url.clone());
-            row.connect_activated(move |_| sender.input(Msg::Open(url.clone())));
-            self.rows.push((row.clone().upcast(), item.clone()));
-            return row.upcast();
-        };
-        let row = adw::ExpanderRow::new();
-        // An unfoldable row puts each new suffix before the others: the last one comes first.
-        let open = icon_button("adw-external-link-symbolic", "Ouvrir dans Todoist");
-        let (sender, url) = (self.sender.clone(), item.url.clone());
-        open.connect_clicked(move |_| sender.input(Msg::Open(url.clone())));
-        row.add_suffix(&open);
-        self.fill_row(&row, item);
-        row.add_row(&self.details_row(item, details));
-        if self.unfolded.contains(&item.id) {
-            row.set_expanded(true);
-        }
-        let (sender, id) = (self.sender.clone(), item.id.clone());
-        let fetch = details.has_comments != Some(false);
-        row.connect_expanded_notify(move |row| {
-            sender.input(if row.is_expanded() {
-                Msg::Unfold(id.clone(), fetch)
-            } else {
-                Msg::Fold(id.clone())
-            });
-        });
-        self.rows.push((row.clone().upcast(), item.clone()));
-        row.upcast()
+    fn needs_setup(&self) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.needs_setup)
     }
 
-    /// What an unfolded task shows: its description, its facts and its comments.
-    fn details_row(&mut self, item: &ItemVm, details: &DetailsVm) -> gtk::ListBoxRow {
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        content.set_margin_top(12);
-        content.set_margin_bottom(12);
-        content.set_margin_start(12);
-        content.set_margin_end(12);
-        if details.description.trim().is_empty() {
-            let none = text_label("Pas de description");
-            none.add_css_class("dim-label");
-            content.append(&none);
-        } else {
-            content.append(&markdown_label(&details.description));
-        }
-        if !details.facts.is_empty() {
-            let grid = gtk::Grid::new();
-            grid.set_column_spacing(12);
-            grid.set_row_spacing(4);
-            for (line, fact) in (0..).zip(&details.facts) {
-                let name = text_label(&fact.label);
-                name.add_css_class("dim-label");
-                name.set_valign(gtk::Align::Start);
-                let value = text_label(&fact.value);
-                value.set_selectable(true);
-                value.set_hexpand(true);
-                grid.attach(&name, 0, line, 1, 1);
-                grid.attach(&value, 1, line, 1, 1);
-            }
-            content.append(&grid);
-        }
-        let heading = text_label("Commentaires");
-        heading.add_css_class("heading");
-        content.append(&heading);
-        let comments = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        content.append(&comments);
-        if details.has_comments == Some(false) {
-            fill_comments(&comments, &Ok(Vec::new()));
-        } else if let Some(known) = self.comments.get(&item.id) {
-            fill_comments(&comments, known);
-        } else {
-            fill_comments(&comments, &Err(String::new()));
-        }
-        self.comment_boxes.insert(item.id.clone(), comments);
-        let row = gtk::ListBoxRow::new();
-        row.set_activatable(false);
-        row.set_selectable(false);
-        row.set_child(Some(&content));
-        row
-    }
-
-    /// The title, subtitle, badges and buttons both kinds of rows share.
-    fn fill_row(&self, row: &impl IsA<adw::PreferencesRow>, item: &ItemVm) {
-        let row = row.as_ref();
-        row.set_title(&escape(&item.title));
-        // A plain row puts each new prefix before the others, an unfoldable one after them.
-        let add_prefixes = |widgets: &[gtk::Widget]| {
-            if let Some(action) = row.downcast_ref::<adw::ActionRow>() {
-                for widget in widgets.iter().rev() {
-                    action.add_prefix(widget);
-                }
-            } else if let Some(expander) = row.downcast_ref::<adw::ExpanderRow>() {
-                for widget in widgets {
-                    expander.add_prefix(widget);
-                }
-            }
-        };
-        let suffixes = std::cell::RefCell::new(Vec::<gtk::Widget>::new());
-        let add_suffix = |widget: &gtk::Widget| suffixes.borrow_mut().push(widget.clone());
-        let set_subtitle = |text: &str, lines: i32| {
-            if let Some(action) = row.downcast_ref::<adw::ActionRow>() {
-                action.set_subtitle(text);
-                action.set_title_lines(2);
-                action.set_subtitle_lines(lines);
-            } else if let Some(expander) = row.downcast_ref::<adw::ExpanderRow>() {
-                expander.set_subtitle(text);
-                expander.set_title_lines(2);
-                expander.set_subtitle_lines(lines);
-            }
-        };
-        add_prefixes(&[
-            flag(item).upcast(),
-            gtk::Image::from_icon_name(&item.icon).upcast(),
-        ]);
-        if item.dimmed {
-            row.add_css_class("dimmed");
-        }
-        if self.compact {
-            let parts = [
-                Some(&item.context),
-                item.state_label.as_ref(),
-                item.due_label.as_ref(),
-            ];
-            let parts: Vec<&str> = parts
-                .into_iter()
-                .flatten()
-                .map(String::as_str)
-                .filter(|text| !text.is_empty())
-                .collect();
-            set_subtitle(&escape(&parts.join(" · ")), 2);
-        } else {
-            set_subtitle(&escape(&item.context), 0);
-            if let Some(text) = &item.state_label {
-                let badge = gtk::Label::new(Some(text));
-                badge.add_css_class("state-badge");
-                badge.set_valign(gtk::Align::Center);
-                if item.action_required {
-                    badge.add_css_class("accent");
-                }
-                add_suffix(badge.upcast_ref());
-            }
-            if let Some(label) = due(item) {
-                add_suffix(label.upcast_ref());
-            }
-            if item.actions.iter().any(|action| action == "snooze") {
-                let button = icon_button("alarm-symbolic", "Reporter à demain");
-                let (sender, id) = (self.sender.clone(), item.id.clone());
-                button.connect_clicked(move |_| sender.input(Msg::Snooze(id.clone(), "tomorrow")));
-                add_suffix(button.upcast_ref());
-            }
-        }
-        if item.actions.iter().any(|action| action == "merge") {
-            let button = gtk::Button::with_label("Merger");
-            button.add_css_class("flat");
-            button.set_valign(gtk::Align::Center);
-            let (sender, id, title) = (self.sender.clone(), item.id.clone(), item.title.clone());
-            button.connect_clicked(move |_| sender.input(Msg::AskMerge(id.clone(), title.clone())));
-            add_suffix(button.upcast_ref());
-        }
-        if item.actions.iter().any(|action| action == "complete") {
-            let button = icon_button("object-select-symbolic", "Marquer comme fait");
-            let (sender, id) = (self.sender.clone(), item.id.clone());
-            button.connect_clicked(move |_| sender.input(Msg::Complete(id.clone())));
-            add_suffix(button.upcast_ref());
-        }
-        let suffixes = suffixes.into_inner();
-        if let Some(action) = row.downcast_ref::<adw::ActionRow>() {
-            for widget in &suffixes {
-                action.add_suffix(widget);
-            }
-        } else if let Some(expander) = row.downcast_ref::<adw::ExpanderRow>() {
-            suffixes
-                .iter()
-                .rev()
-                .for_each(|widget| expander.add_suffix(widget));
-        }
-    }
-
-    fn project_group(&mut self, project: &ProjectVm) -> adw::PreferencesGroup {
-        let group = adw::PreferencesGroup::new();
-        group.set_title(&escape(&project.name));
-        group.set_header_suffix(Some(&dot(&project.color)));
-        if project.action_count > 0 {
-            group.set_description(Some(&format!("{} à traiter", project.action_count)));
-        }
-        if project.collapsed {
-            let expander = adw::ExpanderRow::new();
-            let count = project.items.len();
-            expander.set_title(&if count == 1 {
-                "1 élément".to_owned()
-            } else {
-                format!("{count} éléments")
-            });
-            for item in &project.items {
-                expander.add_row(&self.item_row(item));
-            }
-            group.add(&expander);
-        } else {
-            for item in &project.items {
-                group.add(&self.item_row(item));
-            }
-        }
-        if let Some(bots) = &project.bots {
-            let expander = adw::ExpanderRow::new();
-            expander.set_title(&escape(&bots.label));
-            for item in &bots.items {
-                expander.add_row(&self.item_row(item));
-            }
-            group.add(&expander);
-        }
-        group
-    }
-
-    fn draw_list(&mut self) {
-        while let Some(child) = self.list.first_child() {
-            self.list.remove(&child);
-        }
-        self.rows.clear();
-        self.comment_boxes.clear();
-        self.focused = None;
-        let Some(mut snapshot) = self.snapshot.clone() else {
-            return;
-        };
-        self.place_views();
-        if snapshot.needs_setup {
-            self.list
-                .append(&settings::welcome(&self.sender, &snapshot));
-            return;
-        }
-        // The inbox shows the same pull requests, grouped by what each one waits for.
-        let in_inbox = self.project.as_deref() == Some(INBOX);
-        if in_inbox {
-            snapshot.projects = std::mem::take(&mut snapshot.inbox);
-        }
-        let query = self.search.to_lowercase();
-        if !query.is_empty() {
-            let matches = |item: &ItemVm| {
-                item.title.to_lowercase().contains(&query)
-                    || item.context.to_lowercase().contains(&query)
-            };
-            for project in &mut snapshot.projects {
-                project.items.retain(|item| matches(item));
-                if let Some(bots) = &mut project.bots {
-                    bots.items.retain(|item| matches(item));
-                }
-                if project
-                    .bots
-                    .as_ref()
-                    .is_some_and(|bots| bots.items.is_empty())
-                {
-                    project.bots = None;
-                }
-            }
-            snapshot
-                .projects
-                .retain(|project| !project.items.is_empty() || project.bots.is_some());
-        }
-        let shown: Vec<&ProjectVm> = snapshot
-            .projects
+    /// The sidebar entry in use, as the engine last described it.
+    fn current_entry(&self) -> Option<&Entry> {
+        let sidebar = &self.snapshot.as_ref()?.sidebar;
+        sidebar
+            .views
             .iter()
-            .filter(|project| in_inbox || self.project.as_ref().is_none_or(|id| *id == project.id))
-            .collect();
-        if shown.is_empty() {
-            let page = adw::StatusPage::new();
-            page.set_icon_name(Some("emblem-ok-symbolic"));
-            page.set_title(if in_inbox {
-                "Aucune PR ne t'attend"
-            } else {
-                "Rien à faire"
-            });
-            page.set_vexpand(true);
-            self.list.append(&page);
-            return;
-        }
-        for project in shown {
-            let group = self.project_group(project);
-            self.list.append(&group);
-        }
+            .chain(&sidebar.projects)
+            .find(|entry| entry.id == self.entry)
     }
 
-    fn draw_projects(&self) {
-        while let Some(child) = self.projects.first_child() {
-            self.projects.remove(&child);
-        }
-        let Some(snapshot) = &self.snapshot else {
-            return;
-        };
-        let total: u32 = snapshot
-            .projects
+    fn find_entry(&self, id: &str) -> Option<Entry> {
+        let sidebar = &self.snapshot.as_ref()?.sidebar;
+        sidebar
+            .views
             .iter()
-            .map(|project| project.action_count)
-            .sum();
-        let add = |id: Option<&str>, name: &str, mark: Mark, count: u32| {
-            let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            line.set_margin_top(6);
-            line.set_margin_bottom(6);
-            // A slot of the same width for every mark, so that the names line up.
-            let slot = gtk::CenterBox::new();
-            slot.set_size_request(16, -1);
-            slot.set_hexpand(false);
-            let mark: gtk::Widget = match mark {
-                Mark::Dot(color) => dot(color).upcast(),
-                Mark::Icon(icon) => gtk::Image::from_icon_name(icon).upcast(),
-                Mark::Colors(colors) => all_mark(&colors).upcast(),
-            };
-            slot.set_center_widget(Some(&mark));
-            line.append(&slot);
-            let title = gtk::Label::new(Some(name));
-            title.set_hexpand(true);
-            title.set_xalign(0.0);
-            line.append(&title);
-            if count > 0 {
-                let counter = gtk::Label::new(Some(&count.to_string()));
-                counter.add_css_class("dim-label");
-                line.append(&counter);
-            }
-            let row = gtk::ListBoxRow::new();
-            row.set_child(Some(&line));
-            row.set_widget_name(id.unwrap_or(""));
-            self.projects.append(&row);
-            if self.project.as_deref() == id {
-                self.projects.select_row(Some(&row));
-            }
-        };
-        let section = |title: &str| {
-            let label = gtk::Label::new(Some(title));
-            label.set_xalign(0.0);
-            label.add_css_class("heading");
-            label.add_css_class("dim-label");
-            label.set_margin_top(12);
-            label.set_margin_bottom(4);
-            let row = gtk::ListBoxRow::new();
-            row.set_child(Some(&label));
-            row.set_activatable(false);
-            row.set_selectable(false);
-            row.set_can_focus(false);
-            self.projects.append(&row);
-        };
-        if snapshot.github_connected {
-            section("GitHub");
-            add(
-                Some(INBOX),
-                "PR",
-                Mark::Icon("mail-unread-symbolic"),
-                snapshot.inbox_count,
-            );
-        }
-        section("Projets");
-        let colors: Vec<&str> = snapshot
-            .projects
-            .iter()
-            .map(|project| project.color.as_str())
-            .collect();
-        add(None, "Tous", Mark::Colors(colors), total);
-        for project in &snapshot.projects {
-            add(
-                Some(&project.id),
-                &project.name,
-                Mark::Dot(&project.color),
-                project.action_count,
-            );
-        }
+            .chain(&sidebar.projects)
+            .find(|entry| entry.id == id)
+            .cloned()
     }
 
-    fn draw_views(&self) {
-        while let Some(child) = self.views.first_child() {
-            self.views.remove(&child);
-        }
-        let Some(snapshot) = &self.snapshot else {
-            return;
+    fn selected_item(&self) -> Option<&ItemVm> {
+        let id = self.selected.as_ref()?;
+        self.order.iter().find(|item| item.id == *id)
+    }
+
+    fn load(&self) {
+        spawn_load(&self.sender, self.spec.clone());
+    }
+
+    /// Uses a changed view: the filter bar shows it at once, the list follows.
+    fn spec_changed(&mut self) {
+        self.selected = None;
+        self.selected_index = 0;
+        self.load();
+    }
+
+    fn open_entry(&mut self, entry: &Entry) {
+        self.entry.clone_from(&entry.id);
+        self.spec = entry.spec.clone();
+        self.query_entry.set_text("");
+        self.selected = None;
+        self.selected_index = 0;
+        self.outer.set_show_content(true);
+        self.inner.set_show_content(false);
+        self.draw_sidebar();
+        self.place();
+        self.load();
+    }
+
+    /// Shows the panes the layout and the focus mode leave room for.
+    fn place(&self) {
+        let welcome = self.needs_setup();
+        let page = if welcome {
+            "welcome"
+        } else if self.entry == HOME {
+            "home"
+        } else {
+            "browse"
         };
-        let mut first: Option<gtk::ToggleButton> = None;
-        for view in &snapshot.views {
-            let button = gtk::ToggleButton::with_label(&view.title);
-            button.set_active(view.id == self.view);
-            if let Some(first) = &first {
-                button.set_group(Some(first));
-            } else {
-                first = Some(button.clone());
-            }
-            let (sender, id) = (self.sender.clone(), view.id.clone());
-            button.connect_toggled(move |button| {
-                if button.is_active() {
-                    sender.input(Msg::SetView(id.clone()));
-                }
-            });
-            self.views.append(&button);
+        self.stack.set_visible_child_name(page);
+        let focus = self.focus && page == "browse";
+        self.focused.set(focus);
+        self.outer
+            .set_collapsed(welcome || focus || self.layout != Layout::Wide);
+        self.inner
+            .set_collapsed(focus || self.layout == Layout::Narrow);
+        if welcome || focus {
+            self.outer.set_show_content(true);
+        }
+        if focus {
+            self.inner.set_show_content(true);
+        }
+        self.detail_header.set_show_back_button(!focus);
+        self.unfocus.set_visible(focus);
+        self.focus_button.set_visible(!focus);
+    }
+
+    fn set_focus(&mut self, focus: bool) {
+        self.focus = focus;
+        self.place();
+        self.draw_detail();
+        if !focus && self.layout != Layout::Narrow {
+            self.inner.set_show_content(false);
         }
     }
 
@@ -664,10 +310,7 @@ impl App {
             },
         );
         // The welcome page already says the same thing.
-        let on_connections = self
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.needs_setup);
+        let on_connections = self.needs_setup();
         self.banner.set_title(&escape(&text));
         self.banner
             .set_revealed(!text.is_empty() && (error.is_some() || !on_connections));
@@ -676,36 +319,25 @@ impl App {
             .set_button_label(reconnect.then_some("Connecter"));
     }
 
-    fn needs_setup(&self) -> bool {
-        self.snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.needs_setup)
+    fn draw_welcome(&self) {
+        widgets::clear(&self.welcome);
+        if let Some(snapshot) = &self.snapshot
+            && snapshot.needs_setup
+        {
+            self.welcome
+                .append(&settings::welcome(&self.sender, snapshot));
+        }
     }
 
-    /// In the narrow layout the filters no longer fit in the header, so they get a bar of their own.
-    /// The welcome page shows none of the list's controls.
-    fn place_views(&self) {
-        let welcome = self.needs_setup();
-        // Tasks are added to a project; the inbox only holds pull requests.
-        self.quick
-            .set_visible(!welcome && self.project.as_deref() != Some(INBOX));
-        self.header.set_show_back_button(!welcome);
-        self.split.set_collapsed(welcome || self.compact);
-        if welcome {
-            self.split.set_show_content(true);
-            self.views_bar.set_center_widget(None::<&gtk::Widget>);
-            self.views_bar.set_visible(false);
-            self.header.set_title_widget(None::<&gtk::Widget>);
-            return;
-        }
-        if self.compact {
-            self.header.set_title_widget(None::<&gtk::Widget>);
-            self.views_bar.set_center_widget(Some(&self.views));
-        } else {
-            self.views_bar.set_center_widget(None::<&gtk::Widget>);
-            self.header.set_title_widget(Some(&self.views));
-        }
-        self.views_bar.set_visible(self.compact);
+    /// Draws everything again from what the engine prepared.
+    fn draw(&mut self) {
+        self.draw_sidebar();
+        self.draw_welcome();
+        self.draw_home();
+        self.draw_filters();
+        self.draw_list();
+        self.draw_banner(None);
+        self.place();
     }
 
     /// Writes the configuration being edited and uses it at once; `redraw` when the preferences
@@ -721,13 +353,42 @@ impl App {
         }
     }
 
-    fn focus_row(&mut self, index: usize) {
-        if let Some((row, _)) = self.rows.get(index) {
-            // An unfoldable row takes the focus on its header, inside it.
-            if !row.grab_focus() {
-                row.child_focus(gtk::DirectionType::TabForward);
+    /// Selects the row `step` away from the selected one.
+    fn step(&mut self, step: i32) {
+        if self.order.is_empty() {
+            return;
+        }
+        let last = self.order.len() - 1;
+        let current = self
+            .selected_item()
+            .and_then(|item| self.order.iter().position(|known| known.id == item.id));
+        let target = match (current, step < 0) {
+            (None, _) => 0,
+            (Some(index), true) => index.saturating_sub(1),
+            (Some(index), false) => (index + 1).min(last),
+        };
+        self.select_row(target);
+        self.draw_detail();
+    }
+
+    /// After an action on the selected item, the next one takes its place: handling the list is
+    /// handling one item after the other. `leaves` when the action takes the item off the list.
+    fn advance(&mut self, id: &str, leaves: bool) {
+        if self.selected.as_deref() != Some(id) {
+            return;
+        }
+        let Some(index) = self.order.iter().position(|item| item.id == id) else {
+            return;
+        };
+        if index + 1 < self.order.len() {
+            self.select_row(index + 1);
+            self.draw_detail();
+            // Once the item is gone, the next one stands where it stood.
+            if leaves {
+                self.selected_index = index;
             }
-            self.focused = Some(index);
+        } else if leaves {
+            self.selected_index = index.saturating_sub(1);
         }
     }
 
@@ -735,51 +396,43 @@ impl App {
         if self.needs_setup() || self.preferences.is_some() {
             return;
         }
-        let current = self
-            .rows
-            .iter()
-            .position(|(row, _)| row.has_focus() || row.focus_child().is_some())
-            .or(self.focused);
-        let item = current
-            .and_then(|index| self.rows.get(index))
-            .map(|(_, item)| item.clone());
-        match key {
-            'j' => self.focus_row(current.map_or(0, |index| index + 1)),
-            'k' => self.focus_row(current.map_or(0, |index| index.saturating_sub(1))),
-            'r' => self.sender.input(Msg::Refresh),
-            'o' => {
-                if let Some(item) = item {
-                    self.sender.input(Msg::Open(item.url));
-                }
-            }
-            'a' => {
+        let browsing = self.entry != HOME;
+        let item = self.selected_item().filter(|_| browsing).cloned();
+        let can = |action: &str| {
+            item.as_ref()
+                .is_some_and(|item| item.actions.iter().any(|known| known == action))
+        };
+        match (key, item.as_ref()) {
+            ('j', _) if browsing => self.step(1),
+            ('k', _) if browsing => self.step(-1),
+            ('r', _) => self.sender.input(Msg::Refresh),
+            ('f', _) if browsing => self.sender.input(Msg::Focus(!self.focus)),
+            ('a', _) if browsing && !self.focus => {
                 self.quick.grab_focus();
             }
-            '/' => {
-                self.search_bar.set_search_mode(true);
-                self.search_entry.grab_focus();
+            ('/', _) if browsing && !self.focus => {
+                self.query_entry.grab_focus();
             }
-            'x' => {
-                if let Some(item) = item
-                    && item.actions.iter().any(|action| action == "complete")
-                {
-                    self.sender.input(Msg::Complete(item.id));
-                }
+            ('o', Some(item)) => self.sender.input(Msg::Open(item.id.clone())),
+            ('x', Some(item)) if can("complete") => {
+                self.sender.input(Msg::Complete(item.id.clone()));
             }
-            's' => {
-                if let Some(item) = item {
-                    self.sender.input(Msg::Snooze(item.id, "tomorrow"));
-                }
+            ('s', Some(item)) if can("snooze") => {
+                self.sender.input(Msg::Snooze(item.id.clone(), "tomorrow"));
             }
-            '1'..='9' => {
+            ('m', Some(item)) if can("merge") => {
+                self.sender
+                    .input(Msg::AskMerge(item.id.clone(), item.title.clone()));
+            }
+            ('1'..='9', _) => {
                 let index = key as usize - '1' as usize;
-                let project = self
+                let entry = self
                     .snapshot
                     .as_ref()
-                    .and_then(|snapshot| snapshot.projects.get(index))
-                    .map(|project| project.id.clone());
-                if project.is_some() {
-                    self.sender.input(Msg::SelectProject(project));
+                    .and_then(|snapshot| snapshot.sidebar.projects.get(index + 1))
+                    .map(|entry| entry.id.clone());
+                if let Some(entry) = entry {
+                    self.sender.input(Msg::SelectEntry(entry));
                 }
             }
             _ => {}
@@ -829,6 +482,32 @@ impl App {
         dialog.set_focus(Some(&copy));
     }
 
+    /// Asks for the name of the view to save; the name of a saved view replaces that view.
+    fn ask_save_view(&self) {
+        let dialog = adw::AlertDialog::new(
+            Some("Enregistrer la vue"),
+            Some("Elle s'ajoute à la barre latérale, avec ses filtres et son regroupement."),
+        );
+        let name = gtk::Entry::new();
+        name.set_placeholder_text(Some("Revue du lundi"));
+        name.set_activates_default(true);
+        if let Some(entry) = self.current_entry().filter(|entry| entry.saved) {
+            name.set_text(&entry.title);
+        }
+        dialog.set_extra_child(Some(&name));
+        dialog.add_response("cancel", "Annuler");
+        dialog.add_response("save", "Enregistrer");
+        dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("save"));
+        dialog.set_close_response("cancel");
+        let (sender, typed) = (self.sender.clone(), name.clone());
+        dialog.connect_response(Some("save"), move |_, _| {
+            sender.input(Msg::SaveView(typed.text().to_string()));
+        });
+        dialog.present(Some(&self.window));
+        dialog.set_focus(Some(&name));
+    }
+
     fn apply_mode(&self, mode: &str) {
         let (width, height) = if mode == "sidebar" {
             SIDEBAR_SIZE
@@ -836,7 +515,7 @@ impl App {
             FULL_SIZE
         };
         self.window.set_default_size(width, height);
-        self.split.set_show_content(true);
+        self.outer.set_show_content(true);
         self.window.present();
     }
 }
@@ -863,6 +542,13 @@ fn main_menu(window: &adw::ApplicationWindow, sender: &ComponentSender<App>) -> 
     button
 }
 
+fn refresh_button(sender: &ComponentSender<App>) -> gtk::Button {
+    let refresh = widgets::icon_button("view-refresh-symbolic", "Rafraîchir (R)");
+    let sender = sender.clone();
+    refresh.connect_clicked(move |_| sender.input(Msg::Refresh));
+    refresh
+}
+
 /// Writes `config` and uses it at once; the answer brings the suggestions left.
 fn apply_config(sender: &ComponentSender<App>, config: Config, choices: Choices) {
     let sender = sender.clone();
@@ -874,10 +560,10 @@ fn apply_config(sender: &ComponentSender<App>, config: Config, choices: Choices)
     });
 }
 
-fn spawn_load(sender: &ComponentSender<App>, view: String) {
+fn spawn_load(sender: &ComponentSender<App>, spec: ViewSpec) {
     let sender = sender.clone();
     relm4::spawn(async move {
-        sender.input(Msg::Loaded(service::load(&view).await));
+        sender.input(Msg::Loaded(service::load(&spec).await));
     });
 }
 
@@ -901,6 +587,41 @@ fn start_service(sender: &ComponentSender<App>) {
     });
 }
 
+/// A page of a split view: a header, bars under it, a content and a bar at the bottom.
+fn page(
+    title: &str,
+    header: &adw::HeaderBar,
+    top: &[&gtk::Widget],
+    content: &impl IsA<gtk::Widget>,
+    bottom: Option<&gtk::Widget>,
+) -> adw::NavigationPage {
+    let view = adw::ToolbarView::new();
+    view.add_top_bar(header);
+    for bar in top {
+        view.add_top_bar(*bar);
+    }
+    view.set_content(Some(content));
+    if let Some(bar) = bottom {
+        view.add_bottom_bar(bar);
+    }
+    adw::NavigationPage::new(&view, title)
+}
+
+fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_vexpand(true);
+    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scroll.set_child(Some(child));
+    scroll
+}
+
+fn margins(widget: &impl IsA<gtk::Widget>, vertical: i32, horizontal: i32) {
+    widget.set_margin_top(vertical);
+    widget.set_margin_bottom(vertical);
+    widget.set_margin_start(horizontal);
+    widget.set_margin_end(horizontal);
+}
+
 impl SimpleComponent for App {
     type Init = String;
     type Input = Msg;
@@ -922,54 +643,34 @@ impl SimpleComponent for App {
     ) -> ComponentParts<Self> {
         relm4::set_global_css(include_str!("style.css"));
 
-        let projects = gtk::ListBox::new();
-        projects.add_css_class("navigation-sidebar");
+        // The sidebar: the home page, the views and the projects.
+        let sidebar = gtk::ListBox::new();
+        sidebar.add_css_class("navigation-sidebar");
         let select = sender.clone();
-        projects.connect_row_activated(move |_, row| {
-            let name = row.widget_name();
-            let id = (!name.is_empty()).then(|| name.to_string());
-            select.input(Msg::SelectProject(id));
+        sidebar.connect_row_activated(move |_, row| {
+            select.input(Msg::SelectEntry(row.widget_name().to_string()));
         });
         let sidebar_header = adw::HeaderBar::new();
-        let sidebar_view = adw::ToolbarView::new();
-        sidebar_view.add_top_bar(&sidebar_header);
-        let sidebar_scroll = gtk::ScrolledWindow::new();
-        sidebar_scroll.set_child(Some(&projects));
-        sidebar_view.set_content(Some(&sidebar_scroll));
-        let sidebar_page = adw::NavigationPage::new(&sidebar_view, "Pigeonnier");
+        sidebar_header.pack_end(&main_menu(&window, &sender));
+        let sidebar_page = page(
+            "Pigeonnier",
+            &sidebar_header,
+            &[],
+            &scrolled(&sidebar),
+            None,
+        );
 
-        let views = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        views.add_css_class("linked");
-        let refresh = icon_button("view-refresh-symbolic", "Rafraîchir");
-        let refresh_sender = sender.clone();
-        refresh.connect_clicked(move |_| refresh_sender.input(Msg::Refresh));
-        let header = adw::HeaderBar::new();
-        header.set_title_widget(Some(&views));
-        header.pack_end(&main_menu(&window, &sender));
-        header.pack_end(&refresh);
-
-        let banner = adw::Banner::new("");
-        let banner_sender = sender.clone();
-        banner.connect_button_clicked(move |_| {
-            banner_sender.input(Msg::ShowPreferences(Some(settings::PAGE_ACCOUNTS)));
-        });
-
-        let search_entry = gtk::SearchEntry::new();
-        search_entry.set_hexpand(true);
-        let search_bar = gtk::SearchBar::new();
-        search_bar.set_child(Some(&search_entry));
-        search_bar.connect_entry(&search_entry);
-        let search_sender = sender.clone();
-        search_entry.connect_search_changed(move |entry| {
-            search_sender.input(Msg::Search(entry.text().to_string()));
-        });
-
+        // The list, under its filter bar.
+        let list_title = adw::WindowTitle::new("Pigeonnier", "");
+        let list_header = adw::HeaderBar::new();
+        list_header.set_title_widget(Some(&list_title));
+        list_header.pack_end(&refresh_button(&sender));
+        let (filters, tokens, types, query_entry, display, save, reset) = list::filter_bar(&sender);
+        let headings = Rc::new(RefCell::new(Vec::new()));
+        let list = list::list_box(&sender, &headings);
         let quick = gtk::Entry::new();
         quick.set_placeholder_text(Some("Ajouter une tâche : relire la doc vendredi p2"));
-        quick.set_margin_top(6);
-        quick.set_margin_bottom(6);
-        quick.set_margin_start(12);
-        quick.set_margin_end(12);
+        margins(&quick, 6, 12);
         let quick_sender = sender.clone();
         quick.connect_activate(move |entry| {
             let text = entry.text().trim().to_owned();
@@ -978,73 +679,204 @@ impl SimpleComponent for App {
                 entry.set_text("");
             }
         });
-        let list = gtk::Box::new(gtk::Orientation::Vertical, 18);
-        list.set_margin_top(12);
-        list.set_margin_bottom(18);
-        list.set_margin_start(12);
-        list.set_margin_end(12);
-        let clamp = adw::Clamp::new();
-        clamp.set_maximum_size(900);
-        clamp.set_child(Some(&list));
-        let scroll = gtk::ScrolledWindow::new();
-        scroll.set_vexpand(true);
-        scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
-        scroll.set_child(Some(&clamp));
+        let list_page = page(
+            "Liste",
+            &list_header,
+            &[filters.upcast_ref()],
+            &scrolled(&list),
+            Some(quick.upcast_ref()),
+        );
+
+        // The detail of the selected item, with its actions at the bottom.
+        let detail_title = adw::WindowTitle::new("", "");
+        let detail_header = adw::HeaderBar::new();
+        detail_header.set_title_widget(Some(&detail_title));
+        let unfocus = widgets::shortcut_button("Afficher la liste", "Échap");
+        unfocus.add_css_class("flat");
+        unfocus.set_visible(false);
+        let unfocus_sender = sender.clone();
+        unfocus.connect_clicked(move |_| unfocus_sender.input(Msg::Focus(false)));
+        detail_header.pack_start(&unfocus);
+        let focus_button = widgets::icon_button(
+            "view-fullscreen-symbolic",
+            "Mode concentré : masquer la barre latérale et la liste (F)",
+        );
+        let focus_sender = sender.clone();
+        focus_button.connect_clicked(move |_| focus_sender.input(Msg::Focus(true)));
+        detail_header.pack_end(&focus_button);
+        let step_button = |icon: &str, tooltip: &str, step: i32| {
+            let button = widgets::icon_button(icon, tooltip);
+            let sender = sender.clone();
+            button.connect_clicked(move |_| sender.input(Msg::Step(step)));
+            button
+        };
+        let step_buttons = [
+            step_button("go-up-symbolic", "Élément précédent (K)", -1),
+            step_button("go-down-symbolic", "Élément suivant (J)", 1),
+        ];
+        detail_header.pack_end(&step_buttons[1]);
+        detail_header.pack_end(&step_buttons[0]);
+        let detail = gtk::Box::new(gtk::Orientation::Vertical, 14);
+        margins(&detail, 22, 26);
+        let detail_clamp = adw::Clamp::new();
+        detail_clamp.set_maximum_size(760);
+        detail_clamp.set_child(Some(&detail));
+        let actions = adw::WrapBox::new();
+        actions.set_child_spacing(8);
+        actions.set_line_spacing(8);
+        actions.set_justify(adw::JustifyMode::None);
+        actions.set_halign(gtk::Align::Center);
+        margins(&actions, 10, 12);
+        let detail_page = page(
+            "Détail",
+            &detail_header,
+            &[],
+            &scrolled(&detail_clamp),
+            Some(actions.upcast_ref()),
+        );
+
+        let inner = adw::NavigationSplitView::new();
+        inner.set_min_sidebar_width(380.0);
+        inner.set_max_sidebar_width(520.0);
+        inner.set_sidebar_width_fraction(0.45);
+        inner.set_sidebar(Some(&list_page));
+        inner.set_content(Some(&detail_page));
+
+        // The home page.
+        let home = gtk::Box::new(gtk::Orientation::Vertical, 18);
+        margins(&home, 22, 28);
+        let home_header = adw::HeaderBar::new();
+        home_header.set_title_widget(Some(&adw::WindowTitle::new("Accueil", "")));
+        let home_start = gtk::Button::with_label("Commencer");
+        home_start.add_css_class("suggested-action");
+        let start_sender = sender.clone();
+        home_start.connect_clicked(move |_| start_sender.input(Msg::Start));
+        home_header.pack_end(&home_start);
+        home_header.pack_end(&refresh_button(&sender));
+        let home_view = adw::ToolbarView::new();
+        home_view.add_top_bar(&home_header);
+        home_view.set_content(Some(&scrolled(&home)));
+
+        // The welcome page, before any project exists.
+        let welcome = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let welcome_clamp = adw::Clamp::new();
+        welcome_clamp.set_maximum_size(900);
+        welcome_clamp.set_child(Some(&welcome));
+        let welcome_view = adw::ToolbarView::new();
+        welcome_view.add_top_bar(&adw::HeaderBar::new());
+        welcome_view.set_content(Some(&scrolled(&welcome_clamp)));
+
+        let stack = gtk::Stack::new();
+        stack.add_named(&welcome_view, Some("welcome"));
+        stack.add_named(&home_view, Some("home"));
+        stack.add_named(&inner, Some("browse"));
+        stack.set_vexpand(true);
+        // A hidden page must not ask for room: each one fits the window by itself.
+        stack.set_hhomogeneous(false);
+        stack.set_vhomogeneous(false);
+
+        let banner = adw::Banner::new("");
+        let banner_sender = sender.clone();
+        banner.connect_button_clicked(move |_| {
+            banner_sender.input(Msg::ShowPreferences(Some(settings::PAGE_ACCOUNTS)));
+        });
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
         body.append(&banner);
-        body.append(&search_bar);
-        body.append(&scroll);
-        let views_bar = gtk::CenterBox::new();
-        views_bar.set_margin_bottom(6);
-        views_bar.set_visible(false);
-        let content_view = adw::ToolbarView::new();
-        content_view.add_top_bar(&header);
-        content_view.add_top_bar(&views_bar);
-        content_view.set_content(Some(&body));
-        content_view.add_bottom_bar(&quick);
-        let content_page = adw::NavigationPage::new(&content_view, "Pigeonnier");
+        body.append(&stack);
+        let content_page = adw::NavigationPage::new(&body, "Pigeonnier");
 
-        let split = adw::NavigationSplitView::new();
-        split.set_sidebar(Some(&sidebar_page));
-        split.set_content(Some(&content_page));
-        split.set_show_content(true);
-        window.set_content(Some(&split));
+        let outer = adw::NavigationSplitView::new();
+        outer.set_min_sidebar_width(200.0);
+        outer.set_max_sidebar_width(260.0);
+        outer.set_sidebar(Some(&sidebar_page));
+        outer.set_content(Some(&content_page));
+        outer.set_show_content(true);
+        window.set_content(Some(&outer));
 
-        let narrow =
-            adw::BreakpointCondition::parse("max-width: 560sp").expect("a valid condition");
-        let breakpoint = adw::Breakpoint::new(narrow);
-        breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
-        let compact = sender.clone();
-        breakpoint.connect_apply(move |_| compact.input(Msg::Compact(true)));
-        let wide = sender.clone();
-        breakpoint.connect_unapply(move |_| wide.input(Msg::Compact(false)));
-        window.add_breakpoint(breakpoint);
+        // The last breakpoint that fits wins, so the narrowest one comes last.
+        for (condition, layout) in [
+            ("max-width: 1000sp", Layout::Medium),
+            ("max-width: 620sp", Layout::Narrow),
+        ] {
+            let condition = adw::BreakpointCondition::parse(condition).expect("a valid condition");
+            let breakpoint = adw::Breakpoint::new(condition);
+            let apply = sender.clone();
+            breakpoint.connect_apply(move |_| apply.input(Msg::Layout(layout)));
+            let unapply = sender.clone();
+            breakpoint.connect_unapply(move |_| unapply.input(Msg::Layout(Layout::Wide)));
+            window.add_breakpoint(breakpoint);
+        }
 
         let keys = gtk::EventControllerKey::new();
         let key_sender = sender.clone();
-        keys.connect_key_pressed(move |_, key, _, _| {
-            if let Some(character) = key.to_unicode() {
-                key_sender.input(Msg::Key(character));
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            let plain = !modifiers.intersects(
+                gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK,
+            );
+            if let Some(character) = key.to_unicode().filter(|_| plain) {
+                key_sender.input(Msg::Key(character.to_ascii_lowercase()));
             }
             gtk::glib::Propagation::Proceed
         });
         window.add_controller(keys);
+        // In focus mode Escape brings the panes back. It is caught before the split view, which
+        // would take it as "go back" and show the list alone.
+        let focused = Rc::new(Cell::new(false));
+        let escape_keys = gtk::EventControllerKey::new();
+        escape_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let (escape_sender, in_focus) = (sender.clone(), Rc::clone(&focused));
+        escape_keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape && in_focus.get() {
+                escape_sender.input(Msg::Focus(false));
+                return gtk::glib::Propagation::Stop;
+            }
+            gtk::glib::Propagation::Proceed
+        });
+        window.add_controller(escape_keys);
 
         let present = window.clone();
         relm4::main_application().connect_activate(move |_| present.present());
 
         let model = App {
             window: window.clone(),
-            split,
+            outer,
+            inner,
+            stack,
             banner,
-            header,
-            views_bar,
-            views,
-            compact: false,
-            search_bar,
-            search_entry,
-            search: String::new(),
+            sidebar,
+            welcome,
+            home,
+            home_start,
+            list_title,
+            tokens,
+            types,
+            query_entry,
+            display,
+            save,
+            reset,
+            list,
+            headings,
             quick,
+            detail_title,
+            detail_header,
+            detail,
+            actions,
+            unfocus,
+            focus_button,
+            step_buttons,
+            layout: Layout::Wide,
+            focus: false,
+            focused,
+            entry: HOME.to_owned(),
+            spec: pigeonnier_core::query::everything(),
+            snapshot: None,
+            order: Vec::new(),
+            drawn_groups: None,
+            drawn_filters: None,
+            selected: None,
+            selected_index: 0,
+            comments: None,
+            comment_box: None,
             preferences: None,
             config: None,
             config_changed: false,
@@ -1053,19 +885,10 @@ impl SimpleComponent for App {
             choices_error: None,
             loading_choices: false,
             expanded: None,
-            projects,
-            list,
-            view: "all".to_owned(),
-            project: None,
-            snapshot: None,
-            rows: Vec::new(),
-            focused: None,
-            unfolded: HashSet::new(),
-            comments: HashMap::new(),
-            comment_boxes: HashMap::new(),
             sender: sender.clone(),
         };
         model.apply_mode(&mode);
+        model.place();
         start_service(&sender);
         ComponentParts { model, widgets: () }
     }
@@ -1073,12 +896,12 @@ impl SimpleComponent for App {
     #[allow(clippy::too_many_lines)] // One short arm per message.
     fn update(&mut self, message: Msg, sender: ComponentSender<Self>) {
         match message {
-            Msg::Load => spawn_load(&sender, self.view.clone()),
+            Msg::Load => self.load(),
             Msg::Loaded(Ok(snapshot)) => {
-                let views_changed = self
-                    .snapshot
-                    .as_ref()
-                    .is_none_or(|known| known.views != snapshot.views);
+                // An answer for a view that was left since: the one asked for last is on its way.
+                if snapshot.page.spec != self.spec {
+                    return;
+                }
                 let accounts_changed = self.snapshot.as_ref().is_none_or(|known| {
                     (known.github_connected, known.todoist_connected)
                         != (snapshot.github_connected, snapshot.todoist_connected)
@@ -1088,26 +911,188 @@ impl SimpleComponent for App {
                     self.draw_preferences();
                     sender.input(Msg::LoadPreferences);
                 }
-                if views_changed {
-                    self.draw_views();
-                }
-                self.draw_projects();
-                self.draw_list();
-                self.draw_banner(None);
+                self.draw();
             }
             Msg::Loaded(Err(error)) => self.draw_banner(Some(&error)),
             Msg::Refresh => service::refresh(),
-            Msg::SetView(view) => {
-                self.view = view;
-                spawn_load(&sender, self.view.clone());
+            Msg::SelectEntry(id) => {
+                self.focus = false;
+                if id == HOME {
+                    self.entry = id;
+                    self.outer.set_show_content(true);
+                    self.draw_sidebar();
+                    self.place();
+                } else if let Some(entry) = self.find_entry(&id) {
+                    self.open_entry(&entry);
+                }
             }
-            Msg::SelectProject(project) => {
-                self.project = project;
-                self.split.set_show_content(true);
-                self.draw_projects();
-                self.draw_list();
+            Msg::OpenSpec(spec) => {
+                // A list the sidebar already holds opens there; another one is a change to "Tous".
+                let known = self.snapshot.as_ref().and_then(|snapshot| {
+                    let sidebar = &snapshot.sidebar;
+                    let mut entries = sidebar.views.iter().chain(&sidebar.projects);
+                    entries.find(|entry| entry.spec == spec).cloned()
+                });
+                let entry = known.or_else(|| self.find_entry("projects"));
+                if let Some(mut entry) = entry {
+                    entry.spec = spec;
+                    self.focus = false;
+                    self.open_entry(&entry);
+                }
             }
-            Msg::Open(url) => {
+            Msg::Reveal(project, item) => {
+                if let Some(entry) = self.find_entry(&format!("project:{project}")) {
+                    self.focus = false;
+                    self.open_entry(&entry);
+                    self.selected = Some(item);
+                    self.inner.set_show_content(true);
+                }
+            }
+            Msg::Start => {
+                if let Some(entry) = self.find_entry(START) {
+                    self.open_entry(&entry);
+                    self.focus = true;
+                    self.place();
+                }
+            }
+            Msg::Select(id) => {
+                if let Some(index) = self.order.iter().position(|item| item.id == id) {
+                    self.selected_index = index;
+                }
+                if self.selected.as_ref() != Some(&id) {
+                    self.selected = Some(id);
+                    self.draw_detail();
+                }
+            }
+            Msg::Show(id) => {
+                if let Some(index) = self.order.iter().position(|item| item.id == id) {
+                    self.select_row(index);
+                    self.draw_detail();
+                    self.inner.set_show_content(true);
+                    // With the window to itself, the detail gives the keyboard to its first action
+                    // rather than to a text that would show itself selected.
+                    if self.inner.is_collapsed()
+                        && let Some(action) = self.actions.first_child()
+                    {
+                        action.grab_focus();
+                    }
+                }
+            }
+            Msg::Step(step) => self.step(step),
+            Msg::Focus(focus) => self.set_focus(focus),
+            Msg::SetFilters(filters) => {
+                let before = self.spec.clone();
+                for filter in filters {
+                    self.spec.query.set(filter);
+                }
+                if self.spec != before {
+                    self.spec_changed();
+                }
+            }
+            Msg::RemoveFilter(field) => {
+                self.spec.query = self.spec.query.without(field);
+                self.spec_changed();
+            }
+            Msg::SetType(kind) => {
+                let values: Vec<&str> = kind.as_deref().into_iter().collect();
+                self.spec.query.set(Filter::new(Field::Type, &values));
+                self.spec_changed();
+            }
+            Msg::SetGroup(level, by) => {
+                let mut group = self.spec.group.clone();
+                group.truncate(level);
+                // The second level only exists under a first one, and differs from it.
+                if let Some(by) = by.filter(|by| !group.contains(by)) {
+                    group.push(by);
+                    let below = self.spec.group.get(level + 1).copied();
+                    group.extend(below.filter(|below| *below != by));
+                }
+                if group != self.spec.group {
+                    self.spec.group = group;
+                    self.spec_changed();
+                }
+            }
+            Msg::SetSort(sort) => {
+                if sort != self.spec.sort {
+                    self.spec.sort = sort;
+                    self.spec_changed();
+                }
+            }
+            Msg::SetSnoozed(snoozed) => {
+                if snoozed != self.spec.query.snoozed {
+                    self.spec.query.snoozed = snoozed;
+                    self.spec_changed();
+                }
+            }
+            Msg::QueryText(text, entered) => {
+                let sender = sender.clone();
+                relm4::spawn(async move {
+                    match service::parse_query(&text).await {
+                        Ok(query) => sender.input(Msg::QueryParsed(query, entered)),
+                        Err(error) => sender.input(Msg::Failed(error)),
+                    }
+                });
+            }
+            Msg::QueryParsed(typed, entered) => {
+                let before = self.spec.clone();
+                self.spec.query.text.clone_from(&typed.text);
+                if entered {
+                    for filter in typed.filters {
+                        self.spec.query.set(filter);
+                    }
+                    // The filters became tokens: only the words stay in the entry.
+                    if self.query_entry.text() != typed.text {
+                        self.query_entry.set_text(&typed.text);
+                    }
+                }
+                if self.spec != before {
+                    self.spec_changed();
+                }
+            }
+            Msg::ResetSpec => {
+                if let Some(entry) = self.current_entry().cloned() {
+                    self.open_entry(&entry);
+                }
+            }
+            Msg::AskSaveView => self.ask_save_view(),
+            Msg::SaveView(name) => {
+                let (sender, spec) = (sender.clone(), self.spec.clone());
+                relm4::spawn(async move {
+                    sender.input(Msg::ViewSaved(service::save_view(spec, &name).await));
+                });
+            }
+            Msg::ViewSaved(Ok(entry)) => {
+                self.entry = entry;
+                self.load();
+            }
+            Msg::ViewSaved(Err(error)) | Msg::Failed(error) => {
+                self.banner.set_title(&escape(&error));
+                self.banner.set_button_label(None);
+                self.banner.set_revealed(true);
+            }
+            Msg::DeleteView => {
+                let entry = self.entry.clone();
+                "projects".clone_into(&mut self.entry);
+                let sender = sender.clone();
+                relm4::spawn(async move {
+                    match service::delete_view(&entry).await {
+                        Ok(()) => sender.input(Msg::Load),
+                        Err(error) => sender.input(Msg::Failed(error)),
+                    }
+                });
+            }
+            Msg::Open(id) => {
+                let url = self
+                    .order
+                    .iter()
+                    .find(|item| item.id == id)
+                    .map(|item| item.url.clone());
+                if let Some(url) = url {
+                    sender.input(Msg::OpenPage(url));
+                    self.advance(&id, false);
+                }
+            }
+            Msg::OpenPage(url) => {
                 gtk::UriLauncher::new(&url).launch(
                     Some(&self.window),
                     None::<&gtk::gio::Cancellable>,
@@ -1118,36 +1103,33 @@ impl SimpleComponent for App {
                     },
                 );
             }
-            Msg::Unfold(id, fetch) => {
-                self.unfolded.insert(id.clone());
-                if fetch {
-                    if let Some(target) = self.comment_boxes.get(&id) {
-                        fill_comments(target, &Err(String::new()));
-                    }
-                    let sender = sender.clone();
-                    relm4::spawn(async move {
-                        let comments = service::comments(&id).await;
-                        sender.input(Msg::Comments(id, comments));
-                    });
-                }
-            }
-            Msg::Fold(id) => {
-                self.unfolded.remove(&id);
-                self.comments.remove(&id);
+            Msg::CopyLink(url) => {
+                gtk::prelude::WidgetExt::display(&self.window)
+                    .clipboard()
+                    .set_text(&url);
             }
             Msg::Comments(id, comments) => {
-                if self.unfolded.contains(&id) {
-                    if let Some(target) = self.comment_boxes.get(&id) {
-                        fill_comments(target, &comments);
+                if self.selected.as_deref() == Some(id.as_str()) {
+                    if let Some((_, target)) =
+                        self.comment_box.as_ref().filter(|(known, _)| *known == id)
+                    {
+                        detail::fill_comments(target, &comments);
                     }
-                    self.comments.insert(id, comments);
+                    self.comments = Some((id, comments));
                 }
             }
-            Msg::Complete(id) => run(&sender, async move { service::complete(&id).await }),
+            Msg::Complete(id) => {
+                self.advance(&id, true);
+                run(&sender, async move { service::complete(&id).await });
+            }
             Msg::Snooze(id, until) => {
+                self.advance(&id, true);
                 run(&sender, async move { service::snooze(&id, until).await });
             }
-            Msg::Merge(id) => run(&sender, async move { service::merge(&id).await }),
+            Msg::Merge(id) => {
+                self.advance(&id, true);
+                run(&sender, async move { service::merge(&id).await });
+            }
             Msg::AskMerge(id, title) => {
                 let dialog =
                     adw::AlertDialog::new(Some("Merger cette PR ?"), Some(&escape(&title)));
@@ -1162,20 +1144,17 @@ impl SimpleComponent for App {
                 dialog.present(Some(&self.window));
             }
             Msg::QuickAdd(text) => {
-                let project = self.project.clone();
+                // A list of one project adds to that project; any other one to the Todoist inbox.
+                let project = self
+                    .spec
+                    .query
+                    .filter(Field::Project)
+                    .filter(|filter| !filter.negate && filter.values.len() == 1)
+                    .map(|filter| filter.values[0].clone());
                 run(
                     &sender,
                     async move { service::add_task(project, &text).await },
                 );
-            }
-            Msg::Search(query) => {
-                self.search = query;
-                self.draw_list();
-            }
-            Msg::Failed(message) => {
-                self.banner.set_title(&escape(&message));
-                self.banner.set_button_label(None);
-                self.banner.set_revealed(true);
             }
             Msg::ShowPreferences(page) => self.open_preferences(page),
             Msg::PreferencesClosed => {
@@ -1216,7 +1195,6 @@ impl SimpleComponent for App {
                 });
             }
             Msg::GithubCode(code, url) => self.show_github_code(&code, url),
-            Msg::OpenPage(url) => sender.input(Msg::Open(url)),
             Msg::Disconnect(service) => {
                 run(&sender, async move { service::disconnect(service).await });
             }
@@ -1326,7 +1304,7 @@ impl SimpleComponent for App {
                     self.suggestions = suggestions;
                     self.draw_preferences();
                 }
-                spawn_load(&sender, self.view.clone());
+                self.load();
             }
             Msg::ConfigApplied(Err(error)) => sender.input(Msg::Failed(error)),
             Msg::Expanded(index, open) => {
@@ -1341,13 +1319,13 @@ impl SimpleComponent for App {
                     self.banner.set_title(&escape(&error));
                     self.banner.set_revealed(true);
                 }
-                spawn_load(&sender, self.view.clone());
+                self.load();
             }
             Msg::Key(key) => self.on_key(key),
-            Msg::Compact(compact) => {
-                self.compact = compact;
-                self.place_views();
-                self.draw_list();
+            Msg::Layout(layout) => {
+                self.layout = layout;
+                self.draw_home();
+                self.place();
             }
         }
     }

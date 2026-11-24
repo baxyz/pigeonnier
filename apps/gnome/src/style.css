@@ -1,9 +1,38 @@
-.flag { font-weight: 700; font-size: 0.85em; min-width: 1.6em; }
-.flag-red { color: #e01b24; }
-.flag-orange { color: #e66100; }
-.flag-blue { color: #3584e4; }
+.flag { font-weight: 700; font-size: 0.85em; min-width: 1.7em; }
+.flag-red { color: @red_4; }
+.flag-orange { color: @orange_4; }
+.flag-blue { color: @blue_3; }
 .flag-none { color: transparent; }
-.state-badge { font-size: 0.85em; padding: 0 6px; border-radius: 6px; background: alpha(currentColor, 0.1); }
+.state-badge { font-size: 0.85em; padding: 1px 7px; border-radius: 6px; background: alpha(currentColor, 0.1); }
+.state-badge.tone-red { color: @error_color; background: alpha(@error_bg_color, 0.14); }
+.state-badge.tone-green { color: @success_color; background: alpha(@success_bg_color, 0.16); }
 .dimmed { opacity: 0.55; }
 .project-dot { font-size: 0.8em; }
 .project-dot-small { font-size: 0.45em; margin: -1px 0; }
+.shortcut { font-size: 0.8em; font-weight: 700; padding: 0 5px; border-radius: 5px; background: alpha(currentColor, 0.14); }
+
+/* The type of an item: always the same square, one color a type. */
+.type-icon { border-radius: 6px; }
+.type-pr { color: @blue_4; background: alpha(@blue_3, 0.16); }
+.type-issue { color: @green_5; background: alpha(@green_4, 0.18); }
+.type-task { color: @red_4; background: alpha(@red_3, 0.14); }
+.type-roadmap { color: @purple_4; background: alpha(@purple_3, 0.16); }
+
+.filter-bar { border-bottom: 1px solid alpha(currentColor, 0.1); }
+.token > menubutton > button, .token > button { min-height: 26px; padding-top: 0; padding-bottom: 0; }
+.token > button { padding-left: 4px; padding-right: 4px; min-width: 22px; }
+.add-filter > button { min-height: 26px; padding-top: 0; padding-bottom: 0; border: 1px dashed alpha(currentColor, 0.35); background: none; font-weight: normal; }
+.filter-bar .linked > button { min-height: 28px; padding: 0 9px; }
+
+list.items { background: none; }
+list.items > row { border-bottom: 1px solid alpha(currentColor, 0.07); }
+.row-title { font-weight: 600; }
+.group-heading { padding: 14px 12px 5px; }
+.group-above { margin-bottom: 4px; }
+
+.facts { margin-top: 4px; }
+.comment { padding: 8px 10px; border-radius: 8px; background: alpha(currentColor, 0.05); }
+
+button.home-card { padding: 14px 16px; font-weight: normal; }
+.deadlines { padding: 14px 12px; }
+button.deadline { padding: 6px 4px; font-weight: normal; }
