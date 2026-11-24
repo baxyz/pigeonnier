@@ -16,12 +16,12 @@ use crate::discover;
 use crate::item::{Item, Kind, Priority, Reason, State};
 use crate::normalize::{Context, github_issue, pull_request, roadmap_item, todoist_item};
 use crate::notify;
+use crate::query::ViewSpec;
 use crate::source::SourceError;
 use crate::source::github::{
     GithubClient, Owner, ProjectRead, raw_issue, raw_project_item, raw_pull_request,
 };
 use crate::source::todoist::{Comment, SyncState, TodoistClient, TodoistCommand};
-use crate::view::{View, default_views};
 use crate::viewmodel::{self, Issue, Snapshot};
 
 const KEY_PRS: &str = "github.prs";
@@ -89,7 +89,6 @@ pub struct TodoistChoice {
 
 pub struct Engine {
     config: Config,
-    views: Vec<View>,
     cache: Cache,
     github: Option<GithubClient>,
     todoist: Option<TodoistClient>,
@@ -105,20 +104,9 @@ impl Engine {
     ) -> Self {
         Self {
             config,
-            views: default_views(),
             cache,
             github,
             todoist,
-        }
-    }
-
-    /// Adds user views after the default ones; one with the id of a default view replaces it.
-    pub fn add_views(&mut self, views: Vec<View>) {
-        for view in views {
-            match self.views.iter_mut().find(|known| known.id == view.id) {
-                Some(known) => *known = view,
-                None => self.views.push(view),
-            }
         }
     }
 
@@ -180,11 +168,6 @@ impl Engine {
             None => Vec::new(),
         };
         Ok(Choices { owners, todoist })
-    }
-
-    #[must_use]
-    pub fn views(&self) -> &[View] {
-        &self.views
     }
 
     /// Fetches every source, one failing without stopping the others. Returns what failed.
@@ -427,16 +410,19 @@ impl Engine {
         ))
     }
 
-    /// What a UI draws for a view.
+    /// What a UI draws: the sidebar, the home page and the list of `spec`.
     ///
     /// # Errors
     /// A cache failure.
-    pub fn snapshot(&self, view: &str, now: DateTime<FixedOffset>) -> Result<Snapshot, CacheError> {
+    pub fn snapshot(
+        &self,
+        spec: &ViewSpec,
+        now: DateTime<FixedOffset>,
+    ) -> Result<Snapshot, CacheError> {
         let mut snapshot = viewmodel::build(
             &self.items(now)?,
             &self.config,
-            &self.views,
-            view,
+            spec,
             now,
             self.cache.get(KEY_ISSUES)?.unwrap_or_default(),
             self.cache.get(KEY_REFRESHED)?,
@@ -772,14 +758,7 @@ pub fn connect(config: Config, cache: Cache) -> Engine {
     let todoist = crate::credentials::todoist_token()
         .map(todoist_client)
         .or_else(|| crate::credentials::todoist_session().map(|_| todoist_session_client()));
-    let mut engine = Engine::new(config, cache, github, todoist);
-    if let Ok(text) = std::fs::read_to_string(crate::paths::views_file()) {
-        match serde_json::from_str(&text) {
-            Ok(views) => engine.add_views(views),
-            Err(error) => eprintln!("pigeonnier: ignoring views.json: {error}"),
-        }
-    }
-    engine
+    Engine::new(config, cache, github, todoist)
 }
 
 #[cfg(test)]

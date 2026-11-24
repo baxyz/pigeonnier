@@ -55,6 +55,8 @@ impl std::ops::Not for Truth {
 #[serde(rename_all = "lowercase")]
 pub enum Predicate {
     Is(String, Value),
+    /// A number that is at most the given one.
+    Max(String, i64),
     Not(Box<Predicate>),
     And(Vec<Predicate>),
     Or(Vec<Predicate>),
@@ -68,6 +70,11 @@ impl Predicate {
                 .fields
                 .get(field)
                 .map_or(Truth::Unknown, |value| Truth::from_bool(value == expected)),
+            Self::Max(field, most) => record
+                .fields
+                .get(field)
+                .and_then(Value::as_i64)
+                .map_or(Truth::Unknown, |value| Truth::from_bool(value <= *most)),
             Self::Not(inner) => !inner.eval(record),
             Self::And(predicates) => predicates.iter().fold(Truth::True, |truth, predicate| {
                 truth.and(predicate.eval(record))
@@ -142,6 +149,14 @@ mod tests {
             either.eval(&record(json!({ "a": false, "b": false }))),
             Truth::False
         );
+    }
+
+    #[test]
+    fn max_compares_numbers_and_leaves_absent_ones_undecided() {
+        let recent = Predicate::Max("age_days".to_owned(), 7);
+        assert_eq!(recent.eval(&record(json!({ "age_days": 7 }))), Truth::True);
+        assert_eq!(recent.eval(&record(json!({ "age_days": 8 }))), Truth::False);
+        assert_eq!(recent.eval(&record(json!({}))), Truth::Unknown);
     }
 
     #[test]
