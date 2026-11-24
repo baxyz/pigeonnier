@@ -50,7 +50,7 @@ milestone starts only once the gate is passed.
 | Milestone | Content | Gate |
 | --- | --- | --- |
 | **M1 — It installs and connects** | `packaging/build-flatpak.sh` in the devcontainer; one install command on the host. A first-run page to connect GitHub and Todoist; the settings to reconnect or disconnect. | The maintainer installs the app, opens it and connects both accounts. |
-| **M2 — The list** | Pull requests, tasks and roadmap items grouped by project; the *Tout*, *Action requise* and *Aujourd'hui* filters; search. The settings choose and fix the projects. | The maintainer uses it for a few days and the list is right. |
+| **M2 — The list** | Pull requests, tasks, issues and roadmap items in three panes: a sidebar of saved filters, the list under its filter bar, the detail of the selected item; a home page. The settings choose and fix the projects. | The maintainer uses it for a few days and the list is right. |
 | **M3 — Act** | Open, complete, snooze, quick add, merge after a confirmation. | The maintainer no longer goes to Todoist or GitHub for these. |
 | **M4 — In the background** | Notifications, a counter on the dock icon, actions in the dock's right-click menu, the app staying alive with its window closed. | To define together. |
 
@@ -86,14 +86,36 @@ request or issue decides its project.
 
 ### State of my pull requests, most urgent first
 
-1. Review requested → *à reviewer*
+1. Review requested → *à relire*
 2. `CHANGES_REQUESTED` → *à corriger*
 3. CI `FAILURE` or `ERROR` → *CI rouge*
 4. `CONFLICTING` → *conflits*
 5. `APPROVED`, or no review required, with green or no CI and `MERGEABLE` → *à merger*
 6. Otherwise, or draft, or `mergeable` still `UNKNOWN` → *en attente*, greyed out
 
-Pull requests from bots are folded into one line per project.
+Pull requests from bots are listed like the others, at the lowest priority; the views of what
+waits for me leave them out with the filter `-auteur:robot`.
+
+### The window
+
+- **Three panes.** The sidebar holds the home page and saved filters; the list shows one of them
+  under its filter bar; the detail shows the selected item and its actions. A narrower window
+  folds the sidebar away, then shows one pane at a time.
+- **The sidebar only holds saved filters**, and the filter bar always shows the one in use. A view
+  filters by state or date, a project by project; the grouping is a setting apart.
+- **A filter** is a field, values and "is" or "is not". The fields: project, type, source, state,
+  priority, due date, author (a person or a robot), last change. Filters on different fields
+  combine; the values of one field alternate. A query can be typed (`type:pr état:ci-rouge,conflits
+  -auteur:robot`), and a saved view keeps it as typed, in the configuration.
+- **Grouping** has one or two levels among project, state, type, due date and priority. Groups are
+  always open, and never change nature unless asked to.
+- **Every row has the same anatomy:** priority, a colored icon for the type, the title over where
+  the item lives, then the state and the date.
+- **Triage is the normal use of the list.** After an action (open, complete, snooze, merge) the next
+  item is selected. The focus mode leaves the detail alone on screen. "Commencer", on the home
+  page, opens what waits for me on its first item, in focus mode: it is the only entry button.
+- **The home page** shows four figures, a card per project with what presses, and the items that
+  have a date; everything on it opens a list.
 
 ### Priorities and due dates
 

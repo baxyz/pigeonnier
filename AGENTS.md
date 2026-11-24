@@ -36,10 +36,12 @@ Defined in `scopes.json`:
 pigeonnier/
   crates/
     pigeonnier-core/   ← the pipeline, one module per step:
-                         source/ → map → normalize → filter → sort, with view and viewmodel;
+                         source/ → map → normalize → filter → sort, with query, view and viewmodel;
                          engine is the one interface the app talks to
-  apps/gnome/          ← the app (Relm4, libadwaita): service.rs runs the engine in the background,
-                         settings.rs is the preferences dialog (projects, accounts, app)
+  apps/gnome/          ← the app (Relm4, libadwaita): main.rs holds the window and the messages,
+                         sidebar.rs, list.rs (with the filter bar), detail.rs and home.rs draw the
+                         panes, widgets.rs the pieces they share; service.rs runs the engine in the
+                         background, settings.rs is the preferences dialog (projects, accounts, app)
   packaging/           ← build-flatpak.sh, the desktop file, the metainfo and the icon
   docs/spec.md         ← the goal and the milestones
 ```
