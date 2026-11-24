@@ -149,6 +149,8 @@ impl App {
         if let Some(undated) = &home.undated {
             let note = dim_label(undated);
             note.add_css_class("caption");
+            // A wrapping text asks for its whole line unless told how narrow it may be.
+            note.set_max_width_chars(30);
             note.set_margin_top(8);
             column.append(&note);
         }
