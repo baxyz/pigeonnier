@@ -1,7 +1,8 @@
 .flag { font-weight: 700; font-size: 0.85em; min-width: 1.7em; }
-.flag-red { color: @red_4; }
-.flag-orange { color: @orange_4; }
-.flag-blue { color: @blue_3; }
+/* Mixed with the text color, a hue is darker on a light theme and lighter on a dark one. */
+.flag-red { color: mix(@red_3, @window_fg_color, 0.2); }
+.flag-orange { color: mix(@orange_4, @window_fg_color, 0.2); }
+.flag-blue { color: mix(@blue_3, @window_fg_color, 0.2); }
 .flag-none { color: transparent; }
 .state-badge { font-size: 0.85em; padding: 1px 7px; border-radius: 6px; background: alpha(currentColor, 0.1); }
 .state-badge.tone-red { color: @error_color; background: alpha(@error_bg_color, 0.14); }
@@ -13,10 +14,10 @@
 
 /* The type of an item: always the same square, one color a type. */
 .type-icon { border-radius: 6px; }
-.type-pr { color: @blue_4; background: alpha(@blue_3, 0.16); }
-.type-issue { color: @green_5; background: alpha(@green_4, 0.18); }
-.type-task { color: @red_4; background: alpha(@red_3, 0.14); }
-.type-roadmap { color: @purple_4; background: alpha(@purple_3, 0.16); }
+.type-pr { color: mix(@blue_3, @window_fg_color, 0.3); background: alpha(@blue_3, 0.2); }
+.type-issue { color: mix(@green_4, @window_fg_color, 0.35); background: alpha(@green_4, 0.22); }
+.type-task { color: mix(@red_3, @window_fg_color, 0.3); background: alpha(@red_3, 0.18); }
+.type-roadmap { color: mix(@purple_3, @window_fg_color, 0.3); background: alpha(@purple_3, 0.22); }
 
 .filter-bar { border-bottom: 1px solid alpha(currentColor, 0.1); }
 .token > menubutton > button, .token > button { min-height: 26px; padding-top: 0; padding-bottom: 0; }
