@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! What the UIs draw: lists already sorted and grouped by project, labels ready to show, semantic
-//! colors and the actions each item offers. A new state or sort rule changes this crate only.
+//! What the UIs draw: the sidebar, the list of a view already filtered, sorted and grouped, the
+//! home page, labels ready to show, semantic colors and the actions each item offers. A new state,
+//! filter or sort rule changes this crate only.
 
 use std::collections::HashMap;
 
@@ -9,9 +10,10 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::item::{Details, Due, Duration, Item, Kind, OTHERS, Priority, Reason, State};
+use crate::item::{Due, Duration, Item, Kind, OTHERS, Priority, Reason, State};
+use crate::map::Record;
+use crate::query::{self, Field, Filter, GroupBy, PRESETS, Query, ViewSpec};
 use crate::source::todoist::Comment;
-use crate::view::View;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -19,22 +21,146 @@ pub struct Snapshot {
     pub needs_setup: bool,
     pub github_connected: bool,
     pub todoist_connected: bool,
-    pub view: String,
-    pub views: Vec<ViewChoice>,
-    pub projects: Vec<ProjectVm>,
-    /// The pull request inbox: the same pull requests, grouped by what each one waits for.
-    pub inbox: Vec<ProjectVm>,
-    /// The pull requests of the inbox that wait for me.
-    pub inbox_count: u32,
+    pub sidebar: Sidebar,
+    pub page: Page,
+    pub home: Home,
     pub badge: Badge,
     pub issues: Vec<Issue>,
     pub refreshed_at: Option<DateTime<Utc>>,
 }
 
+/// The entries of the sidebar. Each one is a saved filter: choosing it fills the filter bar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ViewChoice {
+pub struct Sidebar {
+    pub views: Vec<Entry>,
+    pub projects: Vec<Entry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Entry {
+    /// `view:action`, `saved:revue-du-lundi`, `projects` for all of them, `project:acme`.
     pub id: String,
     pub title: String,
+    pub icon: Option<String>,
+    /// The color of a project; several for the entry that shows them all.
+    pub colors: Vec<String>,
+    pub count: u32,
+    /// Saved by the person, who can remove it.
+    pub saved: bool,
+    pub spec: ViewSpec,
+}
+
+/// The list of a view, with what the filter bar shows above it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Page {
+    pub spec: ViewSpec,
+    pub tokens: Vec<Token>,
+    pub criteria: Vec<Criterion>,
+    pub types: Vec<TypeTab>,
+    pub groups: Vec<Group>,
+    pub total: u32,
+}
+
+/// A filter in use, as the bar spells it: "État est à relire, CI rouge".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Token {
+    pub field: Field,
+    pub label: String,
+    pub verb: String,
+    pub values: String,
+}
+
+/// A field one can filter on, with how many items each value would keep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Criterion {
+    pub field: Field,
+    pub label: String,
+    pub single: bool,
+    pub negate: bool,
+    pub values: Vec<CriterionValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CriterionValue {
+    pub id: String,
+    pub label: String,
+    pub count: u32,
+    pub selected: bool,
+}
+
+/// One of the type buttons: everything, or one type, with its count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeTab {
+    /// The value of the type filter; `None` for everything.
+    pub id: Option<String>,
+    /// What the type icon shows: `pr`, `issue`, `task` or `roadmap`.
+    pub type_id: Option<String>,
+    pub label: String,
+    pub count: u32,
+    pub active: bool,
+}
+
+/// Items under one heading. Groups are always open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Group {
+    /// The heading of the first level, on the first group it holds, when there are two levels.
+    pub heading: Option<String>,
+    pub title: String,
+    pub color: Option<String>,
+    pub items: Vec<ItemVm>,
+}
+
+/// The home page: what presses, project by project, and what has a date.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Home {
+    pub stats: Vec<Stat>,
+    pub cards: Vec<Card>,
+    pub deadlines: Vec<Deadline>,
+    /// How many items have no date, said under the deadlines.
+    pub undated: Option<String>,
+    /// How many items "Commencer" would go through.
+    pub start_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stat {
+    pub label: String,
+    pub count: u32,
+    pub alert: bool,
+    pub spec: ViewSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Card {
+    pub entry: String,
+    pub name: String,
+    pub color: String,
+    pub action_count: u32,
+    pub lines: Vec<CardLine>,
+    pub footer: Option<String>,
+    pub spec: ViewSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardLine {
+    pub tag: String,
+    pub tone: Option<String>,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deadline {
+    pub item_id: String,
+    pub project: String,
+    /// "−2" days late, or the day of the month.
+    pub big: String,
+    /// "jours", a weekday or a month.
+    pub small: String,
+    pub overdue: bool,
+    pub type_id: String,
+    pub type_label: String,
+    pub title: String,
+    pub sub: String,
 }
 
 /// The counter of the top bar: what is P1 or late. Red only when something is late.
@@ -53,55 +179,46 @@ pub struct Issue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectVm {
-    pub id: String,
-    pub name: String,
-    pub color: String,
-    pub pinned: bool,
-    /// "Autres" starts folded.
-    pub collapsed: bool,
-    pub action_count: u32,
-    pub overdue_count: u32,
-    pub items: Vec<ItemVm>,
-    pub bots: Option<BotGroup>,
-}
-
-/// Dependency updates, on one line that can be unfolded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BotGroup {
-    pub label: String,
-    pub items: Vec<ItemVm>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemVm {
     pub id: String,
-    pub kind: String,
-    pub icon: String,
+    /// `pr`, `issue`, `task` or `roadmap`: what the type icon shows.
+    pub type_id: String,
+    pub type_label: String,
     pub title: String,
     pub context: String,
+    pub project: String,
+    pub project_name: String,
+    pub project_color: String,
+    /// "GitHub" or "Todoist": where opening the item leads.
+    pub source: String,
     pub url: String,
     pub priority: String,
     /// `red`, `orange`, `blue`, or nothing for P4.
     pub flag_color: Option<String>,
     pub flag_label: String,
     pub due_label: Option<String>,
+    /// The date that matters, in a word or two, for where room is short.
+    pub due_short: Option<String>,
     /// `overdue`, `today`, `soon` or `later`.
     pub due_urgency: Option<String>,
     pub state_label: Option<String>,
+    /// `red` or `green` when the state calls for it.
+    pub state_tone: Option<String>,
     /// Shown dimmed: a draft pull request, not ready for anyone yet.
     pub dimmed: bool,
     pub action_required: bool,
     pub actions: Vec<String>,
-    /// What unfolding the item shows; `None` for an item that only opens its page.
-    pub details: Option<DetailsVm>,
+    pub details: DetailsVm,
 }
 
+/// What the detail pane shows under the title.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailsVm {
-    /// Markdown, for the UI to render.
-    pub description: String,
+    /// Markdown, for the UI to render; `None` when the item has no description to read here.
+    pub description: Option<String>,
     pub facts: Vec<Fact>,
+    /// The item has comments that can be read here.
+    pub commentable: bool,
     /// Whether there are comments to read; `None` when the service did not say.
     pub has_comments: Option<bool>,
 }
@@ -198,49 +315,6 @@ fn size_text(bytes: u64) -> String {
     }
 }
 
-fn details_vm(item: &Item, details: &Details, offset: FixedOffset) -> DetailsVm {
-    let mut facts = Vec::new();
-    let mut fact = |label: &str, value: String| {
-        if !value.is_empty() {
-            facts.push(Fact {
-                label: label.to_owned(),
-                value,
-            });
-        }
-    };
-    fact("Où", details.place.clone());
-    if let Some(due) = item.due {
-        fact(
-            "Prévue",
-            match due {
-                Due::Date(date) => full_date(date),
-                Due::DateTime(time) => full_time(time, offset),
-            },
-        );
-    }
-    if let Some(recurrence) = &details.recurrence {
-        fact("Récurrence", recurrence.clone());
-    }
-    if let Some(deadline) = item.deadline {
-        fact("Échéance", full_date(deadline));
-    }
-    if let Some(duration) = details.duration {
-        fact("Durée", duration_text(duration));
-    }
-    fact("Étiquettes", details.labels.join(", "));
-    if let Some(added) = details.added_at {
-        fact("Créée", full_time(added, offset));
-    }
-    if item.updated_at != DateTime::<Utc>::default() && Some(item.updated_at) != details.added_at {
-        fact("Modifiée", full_time(item.updated_at, offset));
-    }
-    DetailsVm {
-        description: details.description.clone(),
-        facts,
-        has_comments: details.comment_count.map(|count| count > 0),
-    }
-}
-
 /// What an unfolded task shows of its comments.
 #[must_use]
 pub fn comments_vm(comments: &[Comment], now: DateTime<FixedOffset>) -> Vec<CommentVm> {
@@ -272,6 +346,15 @@ fn due_label(item: &Item, now: DateTime<FixedOffset>) -> Option<String> {
     }
 }
 
+/// The date that matters, in a word or two: what cards and deadlines have room for.
+fn short_due(item: &Item, now: DateTime<FixedOffset>) -> Option<String> {
+    match (item.deadline, item.due) {
+        (Some(deadline), _) => Some(date_label(deadline, now.date_naive())),
+        (None, Some(due)) => Some(due_text(due, now)),
+        (None, None) => None,
+    }
+}
+
 fn due_urgency(item: &Item, now: DateTime<FixedOffset>) -> Option<String> {
     let due = item.effective_due()?;
     let days = (due.local_date(*now.offset()) - now.date_naive()).num_days();
@@ -291,9 +374,9 @@ fn state_label(item: &Item, now: DateTime<FixedOffset>) -> Option<String> {
                 .requested_at
                 .map_or(0, |time| (now.with_timezone(&Utc) - time).num_days());
             Some(if days > 0 {
-                format!("à reviewer depuis {days} j")
+                format!("à relire depuis {days} j")
             } else {
-                "à reviewer".to_owned()
+                "à relire".to_owned()
             })
         }
         State::ActionRequired(Reason::ChangesRequested) => Some("à corriger".to_owned()),
@@ -306,19 +389,121 @@ fn state_label(item: &Item, now: DateTime<FixedOffset>) -> Option<String> {
     }
 }
 
-fn kind_name(kind: Kind) -> (&'static str, &'static str) {
-    match kind {
-        Kind::Review => ("review", "avatar-default-symbolic"),
-        Kind::MyPr => ("pr", "document-edit-symbolic"),
-        Kind::ClaudeAction => ("claude", "dialog-information-symbolic"),
-        Kind::Todo => ("todo", "object-select-symbolic"),
-        Kind::Roadmap => ("roadmap", "x-office-calendar-symbolic"),
-        Kind::Issue => ("issue", "emblem-important-symbolic"),
+/// The name and the color of each project, as the items name them.
+struct Projects<'a> {
+    config: &'a Config,
+}
+
+impl Projects<'_> {
+    fn muted(&self, id: &str) -> bool {
+        self.config
+            .projects
+            .iter()
+            .any(|project| project.id == id && project.muted)
+    }
+
+    /// `(order, name, color)`: the pinned ones first, then the order of the configuration, then
+    /// "Autres".
+    fn look(&self, id: &str) -> (usize, &str, &str) {
+        let count = self.config.projects.len();
+        self.config
+            .projects
+            .iter()
+            .position(|project| project.id == id)
+            .map_or((2 * count, "Autres", "gray"), |index| {
+                let project = &self.config.projects[index];
+                let order = if project.pinned { index } else { count + index };
+                (order, project.name.as_str(), project.color.as_str())
+            })
+    }
+
+    /// The projects shown, in their order.
+    fn shown(&self) -> Vec<&crate::config::Project> {
+        let mut shown: Vec<_> = self
+            .config
+            .projects
+            .iter()
+            .filter(|project| !project.muted)
+            .collect();
+        shown.sort_by_key(|project| !project.pinned);
+        shown
     }
 }
 
-fn item_vm(item: &Item, now: DateTime<FixedOffset>) -> ItemVm {
-    let (kind, icon) = kind_name(item.kind);
+fn details_vm(item: &Item, projects: &Projects, now: DateTime<FixedOffset>) -> DetailsVm {
+    let offset = *now.offset();
+    let details = item.details.as_ref();
+    let mut facts = Vec::new();
+    let mut fact = |label: &str, value: String| {
+        if !value.is_empty() {
+            facts.push(Fact {
+                label: label.to_owned(),
+                value,
+            });
+        }
+    };
+    fact("Projet", projects.look(&item.project).1.to_owned());
+    match details {
+        Some(details) => fact("Où", details.place.clone()),
+        None => fact("Où", item.context.clone()),
+    }
+    if let Some(requested) = item.requested_at {
+        fact("Review demandée", full_time(requested, offset));
+    }
+    if let Some(due) = item.due {
+        fact(
+            "Prévue",
+            match due {
+                Due::Date(date) => full_date(date),
+                Due::DateTime(time) => full_time(time, offset),
+            },
+        );
+    }
+    if let Some(recurrence) = details.and_then(|details| details.recurrence.as_ref()) {
+        fact("Récurrence", recurrence.clone());
+    }
+    if let Some(deadline) = item.deadline {
+        fact("Échéance", full_date(deadline));
+    }
+    if let Some(duration) = details.and_then(|details| details.duration) {
+        fact("Durée", duration_text(duration));
+    }
+    if let Some(details) = details {
+        fact("Étiquettes", details.labels.join(", "));
+    }
+    let added = details.and_then(|details| details.added_at);
+    if let Some(added) = added {
+        fact("Créée", full_time(added, offset));
+    }
+    if item.updated_at != DateTime::<Utc>::default() && Some(item.updated_at) != added {
+        fact("Modifiée", full_time(item.updated_at, offset));
+    }
+    DetailsVm {
+        description: details.map(|details| details.description.clone()),
+        facts,
+        commentable: item.is_todoist(),
+        has_comments: details
+            .and_then(|details| details.comment_count)
+            .map(|count| count > 0),
+    }
+}
+
+/// The types, in the order they are offered: `(id, typed value, label, plural)`.
+const TYPES: [(&str, &str, &str, &str); 4] = [
+    ("pr", "pr", "Pull request", "Pull requests"),
+    ("issue", "issue", "Issue", "Issues"),
+    ("task", "tâche", "Tâche", "Tâches"),
+    ("roadmap", "roadmap", "Roadmap", "Roadmap"),
+];
+
+fn type_label(id: &str) -> &'static str {
+    TYPES
+        .iter()
+        .find(|known| known.0 == id)
+        .map_or("", |known| known.2)
+}
+
+fn item_vm(item: &Item, projects: &Projects, now: DateTime<FixedOffset>) -> ItemVm {
     let (flag_color, flag_label) = match item.priority {
         Priority::P1 => (Some("red"), "Priorité 1"),
         Priority::P2 => (Some("orange"), "Priorité 2"),
@@ -326,218 +511,564 @@ fn item_vm(item: &Item, now: DateTime<FixedOffset>) -> ItemVm {
         Priority::P4 => (None, "Priorité 4"),
     };
     let mut actions = vec!["open".to_owned(), "snooze".to_owned()];
-    if item.id.starts_with("td:") {
+    if item.is_todoist() {
         actions.push("complete".to_owned());
     }
     if item.state == State::ActionRequired(Reason::ToMerge) && item.kind == Kind::MyPr {
         actions.push("merge".to_owned());
     }
+    let state_tone = match item.state {
+        State::ActionRequired(Reason::CiFailed | Reason::Conflicts) => Some("red"),
+        State::ActionRequired(Reason::ToMerge) => Some("green"),
+        _ => None,
+    };
+    let (_, project_name, project_color) = projects.look(&item.project);
     ItemVm {
         id: item.id.clone(),
-        kind: kind.to_owned(),
-        icon: icon.to_owned(),
+        type_id: item.type_id().to_owned(),
+        type_label: type_label(item.type_id()).to_owned(),
         title: item.title.clone(),
         context: item.context.clone(),
+        project: item.project.clone(),
+        project_name: project_name.to_owned(),
+        project_color: project_color.to_owned(),
+        source: if item.is_todoist() {
+            "Todoist"
+        } else {
+            "GitHub"
+        }
+        .to_owned(),
         url: item.url.clone(),
         priority: format!("{:?}", item.priority),
         flag_color: flag_color.map(str::to_owned),
         flag_label: flag_label.to_owned(),
         due_label: due_label(item, now),
+        due_short: short_due(item, now),
         due_urgency: due_urgency(item, now),
         state_label: state_label(item, now),
+        state_tone: state_tone.map(str::to_owned),
         dimmed: item.draft,
         action_required: matches!(item.state, State::ActionRequired(_)),
         actions,
-        details: item
-            .details
-            .as_ref()
-            .map(|details| details_vm(item, details, *now.offset())),
+        details: details_vm(item, projects, now),
     }
 }
 
-/// Builds what a UI draws for one view, with projects in the order of the configuration, the pinned
-/// ones first, "Autres" last, and neither muted nor empty ones.
+/// The states, in the order their groups are shown: `(id, title, color)`.
+const STATES: [(&str, &str, &str); 8] = [
+    ("review", "À relire", "blue"),
+    ("changes", "À corriger", "orange"),
+    ("ci", "CI en échec", "red"),
+    ("conflicts", "Conflits", "red"),
+    ("merge", "Prêt à merger", "green"),
+    ("waiting", "En attente", "gray"),
+    ("draft", "Brouillons", "gray"),
+    ("planned", "Planifié", "gray"),
+];
+
+/// The due dates, in the order their groups are shown: `(id, title, color)`.
+const DUES: [(&str, &str, Option<&str>); 5] = [
+    ("late", "En retard", Some("red")),
+    ("today", "Aujourd'hui", Some("orange")),
+    ("week", "Dans les 7 jours", None),
+    ("later", "Plus tard", None),
+    ("none", "Sans date", None),
+];
+
+/// Where an item goes under a grouping: `(order, title, color)`.
+fn group_of(
+    item: &Item,
+    by: GroupBy,
+    projects: &Projects,
+    now: DateTime<FixedOffset>,
+) -> (usize, String, Option<String>) {
+    let found = |index: Option<usize>| index.unwrap_or(usize::MAX);
+    match by {
+        GroupBy::Project => {
+            let (order, name, color) = projects.look(&item.project);
+            (order, name.to_owned(), Some(color.to_owned()))
+        }
+        GroupBy::State => {
+            let index = found(STATES.iter().position(|known| known.0 == item.state_id()));
+            let (_, title, color) = STATES.get(index).copied().unwrap_or_default();
+            (index, title.to_owned(), Some(color.to_owned()))
+        }
+        GroupBy::Type => {
+            let index = found(TYPES.iter().position(|known| known.0 == item.type_id()));
+            let title = TYPES.get(index).map_or("", |known| known.3);
+            (index, title.to_owned(), None)
+        }
+        GroupBy::Due => {
+            let index = found(DUES.iter().position(|known| known.0 == item.due_id(now)));
+            let (_, title, color) = DUES.get(index).copied().unwrap_or_default();
+            (index, title.to_owned(), color.map(str::to_owned))
+        }
+        GroupBy::Priority => (
+            usize::from(item.priority.rank()),
+            format!("{:?}", item.priority),
+            None,
+        ),
+    }
+}
+
+/// Everything the builders share: the items that count, their records and the configuration.
+struct Board<'a> {
+    config: &'a Config,
+    projects: Projects<'a>,
+    /// The items of the projects that are not muted, with the fields a query reads.
+    live: Vec<(&'a Item, Record)>,
+    now: DateTime<FixedOffset>,
+}
+
+impl<'a> Board<'a> {
+    fn new(items: &'a [Item], config: &'a Config, now: DateTime<FixedOffset>) -> Self {
+        let projects = Projects { config };
+        let live = items
+            .iter()
+            .filter(|item| !projects.muted(&item.project))
+            .map(|item| (item, item.to_record(now)))
+            .collect();
+        Self {
+            config,
+            projects,
+            live,
+            now,
+        }
+    }
+
+    /// What a view keeps, in its order.
+    fn run(&self, spec: &ViewSpec) -> Vec<&'a Item> {
+        let by_id: HashMap<&str, &Item> = self
+            .live
+            .iter()
+            .map(|(item, _)| (item.id.as_str(), *item))
+            .collect();
+        let records = self.live.iter().map(|(_, record)| record.clone()).collect();
+        spec.view(self.config)
+            .run(records)
+            .kept
+            .iter()
+            .filter_map(|record| by_id.get(record.provenance.id.as_str()).copied())
+            .filter(|item| spec.query.matches_text(&item.title, &item.context))
+            .collect()
+    }
+
+    fn count(&self, spec: &ViewSpec) -> u32 {
+        count(self.run(spec).into_iter())
+    }
+
+    fn vm(&self, item: &Item) -> ItemVm {
+        item_vm(item, &self.projects, self.now)
+    }
+
+    fn groups(&self, spec: &ViewSpec, kept: &[&Item]) -> Vec<Group> {
+        let levels: Vec<GroupBy> = spec.group.iter().copied().take(2).collect();
+        if levels.is_empty() {
+            return vec![Group {
+                heading: None,
+                title: String::new(),
+                color: None,
+                items: kept.iter().map(|item| self.vm(item)).collect(),
+            }];
+        }
+        // The key of each level, then the position in the sorted list: a stable order.
+        let mut keyed: Vec<_> = kept
+            .iter()
+            .map(|item| {
+                let keys: Vec<_> = levels
+                    .iter()
+                    .map(|by| group_of(item, *by, &self.projects, self.now))
+                    .collect();
+                (keys, *item)
+            })
+            .collect();
+        keyed.sort_by(|(left, _), (right, _)| {
+            let order = |keys: &[(usize, String, Option<String>)]| {
+                keys.iter()
+                    .map(|key| (key.0, key.1.clone()))
+                    .collect::<Vec<_>>()
+            };
+            order(left).cmp(&order(right))
+        });
+        let mut groups: Vec<Group> = Vec::new();
+        let mut previous: Option<Vec<(usize, String, Option<String>)>> = None;
+        for (keys, item) in keyed {
+            if previous.as_ref() != Some(&keys) {
+                let last = keys.last().cloned().unwrap_or_default();
+                let new_heading = previous
+                    .as_ref()
+                    .is_none_or(|known| known.first() != keys.first());
+                groups.push(Group {
+                    heading: (keys.len() > 1 && new_heading).then(|| keys[0].1.clone()),
+                    title: last.1,
+                    color: last.2,
+                    items: Vec::new(),
+                });
+                previous = Some(keys);
+            }
+            if let Some(group) = groups.last_mut() {
+                group.items.push(self.vm(item));
+            }
+        }
+        groups
+    }
+
+    fn criteria(&self, query: &Query) -> Vec<Criterion> {
+        Field::ALL
+            .into_iter()
+            .map(|field| {
+                let rest = self.run(&ViewSpec::new(query.without(field), &[]));
+                let records: Vec<Record> =
+                    rest.iter().map(|item| item.to_record(self.now)).collect();
+                let current = query.filter(field);
+                let values = field
+                    .choices(self.config)
+                    .into_iter()
+                    .map(|choice| CriterionValue {
+                        count: count(records.iter().filter(|record| {
+                            choice.predicate.eval(record) == crate::filter::Truth::True
+                        })),
+                        selected: current.is_some_and(|filter| filter.values.contains(&choice.id)),
+                        id: choice.id,
+                        label: choice.label,
+                    })
+                    .collect();
+                Criterion {
+                    field,
+                    label: field.label().to_owned(),
+                    single: field.single(),
+                    negate: current.is_some_and(|filter| filter.negate),
+                    values,
+                }
+            })
+            .collect()
+    }
+
+    fn page(&self, spec: &ViewSpec) -> Page {
+        let kept = self.run(spec);
+        let criteria = self.criteria(&spec.query);
+        let tokens = spec
+            .query
+            .filters
+            .iter()
+            .filter_map(|filter| {
+                let criterion = criteria.iter().find(|known| known.field == filter.field)?;
+                let values: Vec<&str> = criterion
+                    .values
+                    .iter()
+                    .filter(|value| value.selected)
+                    .map(|value| value.label.as_str())
+                    .collect();
+                let verb = match (criterion.single, filter.negate) {
+                    (true, _) => "depuis",
+                    (false, true) => "n'est pas",
+                    (false, false) => "est",
+                };
+                Some(Token {
+                    field: filter.field,
+                    label: criterion.label.clone(),
+                    verb: verb.to_owned(),
+                    values: values.join(", "),
+                })
+            })
+            .collect();
+        let any_type = self.run(&ViewSpec::new(spec.query.without(Field::Type), &[]));
+        let chosen = spec
+            .query
+            .filter(Field::Type)
+            .filter(|filter| !filter.negate && filter.values.len() == 1)
+            .map(|filter| filter.values[0].as_str());
+        let mut types = vec![TypeTab {
+            id: None,
+            type_id: None,
+            label: "Tout".to_owned(),
+            count: count(any_type.iter()),
+            active: spec.query.filter(Field::Type).is_none(),
+        }];
+        types.extend(TYPES.iter().map(|(id, typed, _, plural)| TypeTab {
+            id: Some((*typed).to_owned()),
+            type_id: Some((*id).to_owned()),
+            label: (*plural).to_owned(),
+            count: count(any_type.iter().filter(|item| item.type_id() == *id)),
+            active: chosen == Some(*typed),
+        }));
+        Page {
+            spec: spec.clone(),
+            tokens,
+            criteria,
+            types,
+            groups: self.groups(spec, &kept),
+            total: count(kept.iter()),
+        }
+    }
+
+    /// What waits for me in a project, dependency updates aside.
+    fn action_count(&self, project: Option<&str>) -> u32 {
+        count(self.live.iter().filter(|(item, _)| {
+            project.is_none_or(|id| item.project == id)
+                && matches!(item.state, State::ActionRequired(_))
+                && !item.bot
+                && !item.is_snoozed(self.now)
+        }))
+    }
+
+    fn has_items(&self, project: &str) -> bool {
+        self.live.iter().any(|(item, _)| item.project == project)
+    }
+
+    fn sidebar(&self) -> Sidebar {
+        let mut views: Vec<Entry> = PRESETS
+            .iter()
+            .map(|(id, title, icon, _, _)| {
+                let spec = query::preset(id, self.config);
+                Entry {
+                    id: format!("view:{id}"),
+                    title: (*title).to_owned(),
+                    icon: Some((*icon).to_owned()),
+                    colors: Vec::new(),
+                    count: self.count(&spec),
+                    saved: false,
+                    spec,
+                }
+            })
+            .collect();
+        views.extend(self.config.views.iter().map(|saved| {
+            let spec = ViewSpec::from_saved(saved, self.config);
+            Entry {
+                id: format!("saved:{}", saved.id),
+                title: saved.name.clone(),
+                icon: Some("starred-symbolic".to_owned()),
+                colors: Vec::new(),
+                count: self.count(&spec),
+                saved: true,
+                spec,
+            }
+        }));
+        let shown = self.projects.shown();
+        let mut projects = vec![Entry {
+            id: "projects".to_owned(),
+            title: "Tous".to_owned(),
+            icon: None,
+            colors: shown.iter().map(|project| project.color.clone()).collect(),
+            count: self.action_count(None),
+            saved: false,
+            spec: query::everything(),
+        }];
+        let others = self.has_items(OTHERS).then_some((OTHERS, "Autres", "gray"));
+        projects.extend(
+            shown
+                .iter()
+                .map(|project| {
+                    (
+                        project.id.as_str(),
+                        project.name.as_str(),
+                        project.color.as_str(),
+                    )
+                })
+                .chain(others)
+                .map(|(id, name, color)| Entry {
+                    id: format!("project:{id}"),
+                    title: name.to_owned(),
+                    icon: None,
+                    colors: vec![color.to_owned()],
+                    count: self.action_count(Some(id)),
+                    saved: false,
+                    spec: query::project(id),
+                }),
+        );
+        Sidebar { views, projects }
+    }
+
+    fn stats(&self) -> Vec<Stat> {
+        let with = |field: Field, value: &str| {
+            let mut spec = query::everything();
+            spec.query.set(Filter::new(field, &[value]));
+            spec
+        };
+        let stat = |label: &str, spec: ViewSpec, alert: bool| {
+            let count = self.count(&spec);
+            Stat {
+                label: label.to_owned(),
+                count,
+                alert: alert && count > 0,
+                spec,
+            }
+        };
+        vec![
+            stat("à traiter", query::preset("action", self.config), false),
+            stat("en retard", with(Field::Due, "en-retard"), true),
+            stat("pour aujourd'hui", with(Field::Due, "aujourd'hui"), false),
+            stat(
+                "reviews qui attendent",
+                query::preset("reviews", self.config),
+                false,
+            ),
+        ]
+    }
+
+    /// What a card says of one item: its state when it waits for me, else its date, else its type.
+    fn card_line(&self, item: &Item) -> CardLine {
+        let vm = self.vm(item);
+        let late = vm.due_urgency.as_deref() == Some("overdue");
+        let (tag, tone) = match (vm.state_label, vm.due_short) {
+            (Some(label), _) if vm.action_required => (label, vm.state_tone),
+            (_, Some(date)) => (date, late.then(|| "red".to_owned())),
+            (Some(label), None) => (label, None),
+            (None, None) => (vm.type_label.to_lowercase(), None),
+        };
+        CardLine {
+            tag,
+            tone,
+            title: vm.title,
+        }
+    }
+
+    /// A card for each project that has something to show, dependency updates aside.
+    fn cards(&self, everything: &[&Item]) -> Vec<Card> {
+        let others = self.has_items(OTHERS).then_some((OTHERS, "Autres", "gray"));
+        let shown = self.projects.shown();
+        let known = shown.iter().map(|project| {
+            (
+                project.id.as_str(),
+                project.name.as_str(),
+                project.color.as_str(),
+            )
+        });
+        known
+            .chain(others)
+            .filter_map(|(id, name, color)| {
+                let own: Vec<&Item> = everything
+                    .iter()
+                    .copied()
+                    .filter(|item| item.project == id && !item.bot)
+                    .collect();
+                if own.is_empty() {
+                    return None;
+                }
+                let next = own
+                    .iter()
+                    .filter(|item| item.effective_due().is_some() && !item.is_overdue(self.now))
+                    .min_by_key(|item| {
+                        item.effective_due()
+                            .map(|due| due.local_date(*self.now.offset()))
+                    });
+                let action_count = self.action_count(Some(id));
+                let footer = match next {
+                    Some(item) => Some(format!(
+                        "Prochaine échéance : {}, {}",
+                        item.title,
+                        short_due(item, self.now).unwrap_or_default()
+                    )),
+                    None if action_count == 0 => Some("Rien d'urgent".to_owned()),
+                    None => None,
+                };
+                Some(Card {
+                    entry: format!("project:{id}"),
+                    name: name.to_owned(),
+                    color: color.to_owned(),
+                    action_count,
+                    lines: own
+                        .iter()
+                        .take(3)
+                        .map(|item| self.card_line(item))
+                        .collect(),
+                    footer,
+                    spec: query::project(id),
+                })
+            })
+            .collect()
+    }
+
+    fn deadline(&self, date: NaiveDate, item: &Item) -> Deadline {
+        let overdue = item.is_overdue(self.now);
+        let days = (date - self.now.date_naive()).num_days();
+        let (big, small) = if overdue && days < 0 {
+            (format!("−{}", -days), "jours")
+        } else if (0..7).contains(&days) {
+            (
+                date.day().to_string(),
+                WEEKDAYS[date.weekday().num_days_from_monday() as usize],
+            )
+        } else {
+            (date.day().to_string(), MONTHS[date.month0() as usize])
+        };
+        let name = self.projects.look(&item.project).1;
+        Deadline {
+            item_id: item.id.clone(),
+            project: item.project.clone(),
+            big,
+            small: small.to_owned(),
+            overdue,
+            type_id: item.type_id().to_owned(),
+            type_label: type_label(item.type_id()).to_owned(),
+            title: item.title.clone(),
+            sub: format!("{name} · {}", short_due(item, self.now).unwrap_or_default()),
+        }
+    }
+
+    fn home(&self) -> Home {
+        let everything = self.run(&query::everything());
+        let offset = *self.now.offset();
+        let mut dated: Vec<(NaiveDate, &Item)> = everything
+            .iter()
+            .filter_map(|item| Some((item.effective_due()?.local_date(offset), *item)))
+            .collect();
+        dated.sort_by_key(|(date, _)| *date);
+        let undated = everything.len() - dated.len();
+        Home {
+            start_count: self.count(&query::preset("action", self.config)),
+            stats: self.stats(),
+            cards: self.cards(&everything),
+            deadlines: dated
+                .iter()
+                .take(8)
+                .map(|(date, item)| self.deadline(*date, item))
+                .collect(),
+            undated: (undated > 0 && !dated.is_empty()).then(|| {
+                format!(
+                    "{undated} éléments sur {} n'ont pas de date : ils restent dans les cartes.",
+                    everything.len()
+                )
+            }),
+        }
+    }
+}
+
+/// Builds what a UI draws: the sidebar, the list of `spec` and the home page. Muted projects are
+/// left out everywhere.
 #[must_use]
 pub fn build(
     items: &[Item],
     config: &Config,
-    views: &[View],
-    view_id: &str,
+    spec: &ViewSpec,
     now: DateTime<FixedOffset>,
     issues: Vec<Issue>,
     refreshed_at: Option<DateTime<Utc>>,
 ) -> Snapshot {
-    let view = views
-        .iter()
-        .find(|view| view.id == view_id)
-        .or_else(|| views.first());
-    let records = items.iter().map(|item| item.to_record(now)).collect();
-    let kept = view.map_or_else(Vec::new, |view| view.run(records).kept);
-    let by_id: HashMap<&str, &Item> = items.iter().map(|item| (item.id.as_str(), item)).collect();
-
-    let shown: Vec<&Item> = kept
-        .iter()
-        .filter_map(|record| by_id.get(record.provenance.id.as_str()).copied())
-        .collect();
-    let inbox = inbox(&shown, now);
-    let inbox_count = inbox.iter().map(|group| group.action_count).sum();
-    let mut groups: HashMap<&str, (Vec<ItemVm>, Vec<ItemVm>)> = HashMap::new();
-    for item in shown {
-        let group = groups.entry(item.project.as_str()).or_default();
-        let list = if item.bot { &mut group.1 } else { &mut group.0 };
-        list.push(item_vm(item, now));
-    }
-
-    let mut configured: Vec<_> = config
-        .projects
-        .iter()
-        .filter(|project| !project.muted)
-        .collect();
-    configured.sort_by_key(|project| !project.pinned);
-    let mut projects: Vec<ProjectVm> = Vec::new();
-    let mut add = |id: &str, name: &str, color: &str, pinned: bool, collapsed: bool| {
-        let Some((list, bots)) = groups.remove(id) else {
-            return;
-        };
-        let live = || {
-            items
-                .iter()
-                .filter(|item| item.project == id && !item.is_snoozed(now))
-        };
-        projects.push(ProjectVm {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            color: color.to_owned(),
-            pinned,
-            collapsed,
-            action_count: count(
-                live().filter(|item| matches!(item.state, State::ActionRequired(_)) && !item.bot),
-            ),
-            overdue_count: count(live().filter(|item| item.is_overdue(now))),
-            items: list,
-            bots: bot_group(bots),
-        });
-    };
-    for project in configured {
-        add(
-            &project.id,
-            &project.name,
-            &project.color,
-            project.pinned,
-            false,
-        );
-    }
-    add(OTHERS, "Autres", "gray", false, true);
-
+    let board = Board::new(items, config, now);
     Snapshot {
         needs_setup: config.projects.is_empty(),
         github_connected: false,
         todoist_connected: false,
-        view: view.map_or_else(String::new, |view| view.id.clone()),
-        views: views
-            .iter()
-            .map(|view| ViewChoice {
-                id: view.id.clone(),
-                title: view.title.clone(),
-            })
-            .collect(),
+        sidebar: board.sidebar(),
+        page: board.page(spec),
+        home: board.home(),
         badge: badge(items, config, now),
-        projects,
-        inbox,
-        inbox_count,
         issues,
         refreshed_at,
     }
 }
 
-/// The groups of the pull request inbox, in the order they are shown: `(id, title, color)`. The
-/// first five wait for me.
-const INBOX: [(&str, &str, &str); 8] = [
-    ("review", "À relire", "blue"),
-    ("changes", "À corriger", "orange"),
-    ("ci", "CI en échec", "red"),
-    ("conflicts", "Conflits", "red"),
-    ("merge", "Prêtes à merger", "green"),
-    ("waiting", "En attente de review", "gray"),
-    ("drafts", "Brouillons", "gray"),
-    ("dependencies", "Mises à jour de dépendances", "gray"),
-];
-const INBOX_ACTIONS: usize = 5;
-
-/// The inbox group of a pull request; other items have none.
-fn inbox_group(item: &Item) -> Option<usize> {
-    let id = match (item.kind, item.state) {
-        (Kind::Review | Kind::MyPr, _) if item.bot => "dependencies",
-        (Kind::Review, _) => "review",
-        (Kind::MyPr, State::ActionRequired(Reason::ChangesRequested)) => "changes",
-        (Kind::MyPr, State::ActionRequired(Reason::CiFailed)) => "ci",
-        (Kind::MyPr, State::ActionRequired(Reason::Conflicts)) => "conflicts",
-        (Kind::MyPr, State::ActionRequired(Reason::ToMerge)) => "merge",
-        (Kind::MyPr, _) if item.draft => "drafts",
-        (Kind::MyPr, _) => "waiting",
-        _ => return None,
-    };
-    INBOX.iter().position(|(known, _, _)| *known == id)
-}
-
-/// The pull requests of `items`, in their order, grouped like GitHub's inbox. Empty groups are
-/// left out; dependency updates make a group of their own, open like the others.
-fn inbox(items: &[&Item], now: DateTime<FixedOffset>) -> Vec<ProjectVm> {
-    let mut groups: Vec<Vec<ItemVm>> = vec![Vec::new(); INBOX.len()];
-    for item in items {
-        if let Some(index) = inbox_group(item) {
-            groups[index].push(item_vm(item, now));
-        }
-    }
-    INBOX
-        .iter()
-        .zip(groups)
-        .enumerate()
-        .filter(|(_, (_, list))| !list.is_empty())
-        .map(|(index, ((id, name, color), list))| ProjectVm {
-            id: format!("inbox:{id}"),
-            name: (*name).to_owned(),
-            color: (*color).to_owned(),
-            pinned: false,
-            collapsed: false,
-            action_count: if index < INBOX_ACTIONS {
-                u32::try_from(list.len()).unwrap_or(u32::MAX)
-            } else {
-                0
-            },
-            overdue_count: 0,
-            items: list,
-            bots: None,
-        })
-        .collect()
-}
-
-fn count<'a>(items: impl Iterator<Item = &'a Item>) -> u32 {
+fn count<T>(items: impl Iterator<Item = T>) -> u32 {
     u32::try_from(items.count()).unwrap_or(u32::MAX)
 }
 
-fn bot_group(bots: Vec<ItemVm>) -> Option<BotGroup> {
-    if bots.is_empty() {
-        return None;
-    }
-    let label = match bots.len() {
-        1 => "1 mise à jour de dépendance".to_owned(),
-        count => format!("{count} mises à jour de dépendances"),
-    };
-    Some(BotGroup { label, items: bots })
-}
-
 fn badge(items: &[Item], config: &Config, now: DateTime<FixedOffset>) -> Badge {
-    let muted = |project: &str| {
-        config
-            .projects
-            .iter()
-            .any(|known| known.id == project && known.muted)
-    };
+    let projects = Projects { config };
     let live = || {
         items
             .iter()
-            .filter(|item| !item.is_snoozed(now) && !item.bot && !muted(&item.project))
+            .filter(|item| !item.is_snoozed(now) && !item.bot && !projects.muted(&item.project))
     };
     Badge {
         count: count(live().filter(|item| item.priority == Priority::P1 || item.is_overdue(now))),
@@ -550,8 +1081,8 @@ mod tests {
     use chrono::Duration;
 
     use super::*;
+    use crate::query::{SortBy, everything, preset};
     use crate::source::Provenance;
-    use crate::view::default_views;
 
     fn now() -> DateTime<FixedOffset> {
         DateTime::parse_from_rfc3339("2026-11-08T10:00:00+01:00").unwrap()
@@ -587,6 +1118,13 @@ mod tests {
         }
     }
 
+    fn pr(id: &str, project: &str, kind: Kind, state: State) -> Item {
+        let mut item = item(id, project);
+        item.kind = kind;
+        item.state = state;
+        item
+    }
+
     fn config() -> Config {
         Config::parse(
             r#"
@@ -610,16 +1148,30 @@ mod tests {
         .unwrap()
     }
 
-    fn snapshot(items: &[Item], view: &str) -> Snapshot {
-        build(
-            items,
-            &config(),
-            &default_views(),
-            view,
-            now(),
-            Vec::new(),
-            None,
-        )
+    fn snapshot_of(items: &[Item], spec: &ViewSpec) -> Snapshot {
+        build(items, &config(), spec, now(), Vec::new(), None)
+    }
+
+    fn snapshot(items: &[Item]) -> Snapshot {
+        snapshot_of(items, &everything())
+    }
+
+    fn typed(text: &str, group: &[GroupBy]) -> ViewSpec {
+        ViewSpec::new(Query::parse(text, &config()), group)
+    }
+
+    /// The groups of a page, as `(heading, title, ids)`.
+    fn groups(page: &Page) -> Vec<(Option<&str>, &str, Vec<&str>)> {
+        page.groups
+            .iter()
+            .map(|group| {
+                (
+                    group.heading.as_deref(),
+                    group.title.as_str(),
+                    group.items.iter().map(|item| item.id.as_str()).collect(),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -630,18 +1182,36 @@ mod tests {
             item("3", "muted"),
             item("4", OTHERS),
         ];
-        let snapshot = snapshot(&items, "all");
-        let ids: Vec<_> = snapshot
+        let snapshot = snapshot(&items);
+        assert_eq!(
+            groups(&snapshot.page),
+            [
+                (None, "B", vec!["2"]),
+                (None, "A", vec!["1"]),
+                (None, "Autres", vec!["4"]),
+            ]
+        );
+        let entries: Vec<_> = snapshot
+            .sidebar
             .projects
             .iter()
-            .map(|project| project.id.as_str())
+            .map(|entry| entry.id.as_str())
             .collect();
-        assert_eq!(ids, ["b", "a", OTHERS]);
-        assert!(snapshot.projects[2].collapsed);
+        // Every project that is not muted keeps its entry, even with nothing to show.
+        assert_eq!(
+            entries,
+            [
+                "projects",
+                "project:b",
+                "project:a",
+                "project:empty",
+                "project:others"
+            ]
+        );
     }
 
     #[test]
-    fn the_sort_of_the_view_reaches_each_project() {
+    fn the_sort_of_the_view_reaches_each_group() {
         let mut low = item("low", "a");
         low.priority = Priority::P3;
         let mut late = item("late", "a");
@@ -651,37 +1221,30 @@ mod tests {
         let mut waiting = item("waiting", "a");
         waiting.priority = Priority::P1;
         waiting.state = State::Waiting;
-        let snapshot = snapshot(&[low, waiting, high, late], "all");
-        let ids: Vec<_> = snapshot.projects[0]
-            .items
-            .iter()
-            .map(|item| item.id.as_str())
-            .collect();
-        assert_eq!(ids, ["late", "high", "low", "waiting"]);
-    }
-
-    #[test]
-    fn bots_fold_on_one_line() {
-        let mut bots: Vec<Item> = ["x", "y"].iter().map(|id| item(id, "a")).collect();
-        for bot in &mut bots {
-            bot.bot = true;
-        }
-        bots.push(item("person", "a"));
-        let project = &snapshot(&bots, "all").projects[0];
-        assert_eq!(project.items.len(), 1);
+        let items = [low, waiting, high, late];
         assert_eq!(
-            project.bots.as_ref().unwrap().label,
-            "2 mises à jour de dépendances"
+            groups(&snapshot(&items).page)[0].2,
+            ["late", "high", "low", "waiting"]
+        );
+        let mut by_priority = everything();
+        by_priority.sort = SortBy::Priority;
+        assert_eq!(
+            groups(&snapshot_of(&items, &by_priority).page)[0].2,
+            ["high", "waiting", "low", "late"]
         );
     }
 
     #[test]
-    fn snoozed_items_leave_the_list_until_their_time() {
+    fn snoozed_items_leave_the_list_until_their_time_or_until_asked_for() {
         let mut snoozed = item("s", "a");
         snoozed.snoozed_until = Some(now().with_timezone(&Utc) + Duration::hours(1));
-        assert_eq!(snapshot(std::slice::from_ref(&snoozed), "all").projects, []);
+        let items = [snoozed.clone()];
+        assert_eq!(snapshot(&items).page.total, 0);
+        let mut shown = everything();
+        shown.query.snoozed = true;
+        assert_eq!(snapshot_of(&items, &shown).page.total, 1);
         snoozed.snoozed_until = Some(now().with_timezone(&Utc) - Duration::hours(1));
-        assert_eq!(snapshot(&[snoozed], "all").projects.len(), 1);
+        assert_eq!(snapshot(&[snoozed]).page.total, 1);
     }
 
     #[test]
@@ -689,7 +1252,7 @@ mod tests {
         let mut p1 = item("p1", "a");
         p1.priority = Priority::P1;
         assert_eq!(
-            snapshot(std::slice::from_ref(&p1), "all").badge,
+            snapshot(std::slice::from_ref(&p1)).badge,
             Badge {
                 count: 1,
                 alert: false
@@ -698,7 +1261,7 @@ mod tests {
         let mut late = item("late", "a");
         late.due = Some(Due::Date(date("2026-11-01")));
         assert_eq!(
-            snapshot(&[p1, late], "all").badge,
+            snapshot(&[p1, late]).badge,
             Badge {
                 count: 2,
                 alert: true
@@ -715,13 +1278,8 @@ mod tests {
         let mut later = item("later", "a");
         later.due = Some(Due::Date(date("2026-11-20")));
         let undated = item("undated", "a");
-        let snapshot = snapshot(&[late, today, later, undated], "today");
-        let ids: Vec<_> = snapshot.projects[0]
-            .items
-            .iter()
-            .map(|item| item.id.as_str())
-            .collect();
-        assert_eq!(ids, ["late", "today"]);
+        let snapshot = snapshot_of(&[late, today, later, undated], &preset("today", &config()));
+        assert_eq!(groups(&snapshot.page)[0].2, ["late", "today"]);
     }
 
     #[test]
@@ -740,44 +1298,85 @@ mod tests {
             due_label(&both, now()).unwrap(),
             "prévu demain · limite ven."
         );
+        assert_eq!(vm(&both).due_short.as_deref(), Some("ven."));
 
         let mut review = item("x", "a");
         review.state = State::ActionRequired(Reason::ToReview);
         review.requested_at = Some(now().with_timezone(&Utc) - Duration::days(3));
-        assert_eq!(
-            state_label(&review, now()).unwrap(),
-            "à reviewer depuis 3 j"
-        );
+        assert_eq!(state_label(&review, now()).unwrap(), "à relire depuis 3 j");
+    }
+
+    fn vm(item: &Item) -> ItemVm {
+        let config = config();
+        item_vm(item, &Projects { config: &config }, now())
     }
 
     #[test]
     fn only_todoist_tasks_can_be_completed() {
-        let task = item_vm(&item("td:1", "a"), now());
-        assert!(task.actions.contains(&"complete".to_owned()));
-        let pr = item_vm(&item("gh-pr:a/b#1", "a"), now());
+        assert!(
+            vm(&item("td:1", "a"))
+                .actions
+                .contains(&"complete".to_owned())
+        );
+        let pr = vm(&item("gh-pr:a/b#1", "a"));
         assert!(!pr.actions.contains(&"complete".to_owned()));
+        assert_eq!(pr.source, "GitHub");
     }
 
     #[test]
     fn only_my_prs_ready_to_merge_can_be_merged() {
-        let mut ready = item("gh-pr:a/b#1", "a");
-        ready.kind = Kind::MyPr;
-        ready.state = State::ActionRequired(Reason::ToMerge);
-        assert!(item_vm(&ready, now()).actions.contains(&"merge".to_owned()));
+        let mut ready = pr(
+            "gh-pr:a/b#1",
+            "a",
+            Kind::MyPr,
+            State::ActionRequired(Reason::ToMerge),
+        );
+        assert!(vm(&ready).actions.contains(&"merge".to_owned()));
+        assert_eq!(vm(&ready).state_tone.as_deref(), Some("green"));
         ready.state = State::Waiting;
-        assert!(!item_vm(&ready, now()).actions.contains(&"merge".to_owned()));
+        assert!(!vm(&ready).actions.contains(&"merge".to_owned()));
+    }
+
+    #[test]
+    fn every_item_says_what_it_is_and_where_it_belongs() {
+        let review = vm(&pr(
+            "gh-pr:a/b#1",
+            "b",
+            Kind::Review,
+            State::ActionRequired(Reason::ToReview),
+        ));
+        assert_eq!(
+            (review.type_id.as_str(), review.type_label.as_str()),
+            ("pr", "Pull request")
+        );
+        assert_eq!(
+            (review.project_name.as_str(), review.project_color.as_str()),
+            ("B", "blue")
+        );
+        let mut claude = item("td:2", OTHERS);
+        claude.kind = Kind::ClaudeAction;
+        assert_eq!(vm(&claude).type_id, "task");
+        assert_eq!(vm(&claude).project_name, "Autres");
+        assert_eq!(
+            vm(&pr("r", "a", Kind::Roadmap, State::Planned)).type_id,
+            "roadmap"
+        );
+        assert_eq!(
+            vm(&pr("i", "a", Kind::Issue, State::Planned)).type_id,
+            "issue"
+        );
     }
 
     #[test]
     fn a_snapshot_survives_json() {
-        let snapshot = snapshot(&[item("1", "a")], "all");
+        let snapshot = snapshot(&[item("1", "a")]);
         let text = serde_json::to_string(&snapshot).unwrap();
         assert_eq!(serde_json::from_str::<Snapshot>(&text).unwrap(), snapshot);
     }
 
     #[test]
-    fn unfolded_details_are_spelled_out() {
-        use crate::item::Duration;
+    fn details_are_spelled_out() {
+        use crate::item::{Details, Duration};
         let mut task = item("td:1", "a");
         task.due = Some(Due::Date(date("2026-11-10")));
         task.updated_at = DateTime::parse_from_rfc3339("2026-11-07T09:05:00Z")
@@ -792,8 +1391,8 @@ mod tests {
             added_at: None,
             comment_count: Some(0),
         });
-        let vm = item_vm(&task, now()).details.unwrap();
-        let facts: Vec<(&str, &str)> = vm
+        let details = vm(&task).details;
+        let facts: Vec<(&str, &str)> = details
             .facts
             .iter()
             .map(|fact| (fact.label.as_str(), fact.value.as_str()))
@@ -801,6 +1400,7 @@ mod tests {
         assert_eq!(
             facts,
             [
+                ("Projet", "A"),
                 ("Où", "Dev / acme"),
                 ("Prévue", "mar. 10 nov. 2026"),
                 ("Récurrence", "every tuesday"),
@@ -809,8 +1409,19 @@ mod tests {
                 ("Modifiée", "sam. 7 nov. 2026 à 10:05"),
             ]
         );
-        assert_eq!(vm.has_comments, Some(false));
-        assert!(item_vm(&item("gh-pr:x", "a"), now()).details.is_none());
+        assert_eq!(details.description.as_deref(), Some("x"));
+        assert_eq!(
+            (details.commentable, details.has_comments),
+            (true, Some(false))
+        );
+
+        // A pull request has no description to read here, and says where it lives.
+        let mut pull = item("gh-pr:x", "a");
+        pull.context = "tool#1".to_owned();
+        let details = vm(&pull).details;
+        assert_eq!(details.description, None);
+        assert!(!details.commentable);
+        assert_eq!(details.facts[1].value, "tool#1");
     }
 
     #[test]
@@ -824,56 +1435,272 @@ mod tests {
         assert_eq!(size_text(2_500_000), "2.5 Mo");
     }
 
-    #[test]
-    fn the_inbox_groups_pull_requests_by_what_they_wait_for() {
-        let pr = |id: &str, kind: Kind, state: State| {
-            let mut item = item(id, "a");
-            item.kind = kind;
-            item.state = state;
-            item
-        };
-        let mut draft = pr("draft", Kind::MyPr, State::Waiting);
+    fn pull_requests() -> Vec<Item> {
+        let mut draft = pr("draft", "a", Kind::MyPr, State::Waiting);
         draft.draft = true;
-        let mut bot = pr("bot", Kind::Review, State::ActionRequired(Reason::ToReview));
+        let mut bot = pr(
+            "bot",
+            "a",
+            Kind::Review,
+            State::ActionRequired(Reason::ToReview),
+        );
         bot.bot = true;
-        let items = [
+        vec![
             pr(
                 "review",
+                "b",
                 Kind::Review,
                 State::ActionRequired(Reason::ToReview),
             ),
-            pr("ci", Kind::MyPr, State::ActionRequired(Reason::CiFailed)),
-            pr("waiting", Kind::MyPr, State::Waiting),
+            pr(
+                "ci",
+                "a",
+                Kind::MyPr,
+                State::ActionRequired(Reason::CiFailed),
+            ),
+            pr("waiting", "a", Kind::MyPr, State::Waiting),
             draft,
             bot,
             item("task", "a"),
-        ];
+        ]
+    }
 
-        let snapshot = snapshot(&items, "all");
+    #[test]
+    fn pull_requests_group_by_what_they_wait_for() {
+        let snapshot = snapshot_of(&pull_requests(), &preset("prs", &config()));
+        assert_eq!(
+            groups(&snapshot.page),
+            [
+                (None, "À relire", vec!["review", "bot"]),
+                (None, "CI en échec", vec!["ci"]),
+                (None, "En attente", vec!["waiting"]),
+                (None, "Brouillons", vec!["draft"]),
+            ]
+        );
+        assert_eq!(snapshot.page.groups[1].color.as_deref(), Some("red"));
+        assert_eq!(
+            snapshot.page.groups[3].items[0].state_label.as_deref(),
+            Some("brouillon")
+        );
+    }
 
-        let groups: Vec<(&str, Vec<&str>)> = snapshot
-            .inbox
+    #[test]
+    fn two_levels_of_groups_show_the_first_one_as_a_heading() {
+        let spec = typed("type:pr", &[GroupBy::State, GroupBy::Project]);
+        let snapshot = snapshot_of(&pull_requests(), &spec);
+        assert_eq!(
+            groups(&snapshot.page)[..3],
+            [
+                (Some("À relire"), "B", vec!["review"]),
+                (None, "A", vec!["bot"]),
+                (Some("CI en échec"), "A", vec!["ci"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_grouping_gives_one_flat_list() {
+        let snapshot = snapshot_of(&pull_requests(), &typed("type:pr", &[]));
+        assert_eq!(snapshot.page.groups.len(), 1);
+        assert_eq!(snapshot.page.groups[0].items.len(), 5);
+    }
+
+    #[test]
+    fn the_filter_bar_spells_the_filters_and_counts_what_each_value_would_keep() {
+        let spec = typed("type:pr état:ci-rouge,à-relire -auteur:robot", &[]);
+        let page = snapshot_of(&pull_requests(), &spec).page;
+        assert_eq!(page.total, 2);
+        let tokens: Vec<String> = page
+            .tokens
             .iter()
-            .map(|group| {
-                let ids = group.items.iter().map(|item| item.id.as_str()).collect();
-                (group.id.as_str(), ids)
+            .map(|token| format!("{} {} {}", token.label, token.verb, token.values))
+            .collect();
+        assert_eq!(
+            tokens,
+            [
+                "Type est PR",
+                "État est à relire, CI rouge",
+                "Auteur n'est pas un robot"
+            ]
+        );
+        // The counts of a field ignore its own filter: they say what choosing a value would give.
+        let state = page
+            .criteria
+            .iter()
+            .find(|criterion| criterion.field == Field::State)
+            .unwrap();
+        let counts: Vec<(&str, u32, bool)> = state
+            .values
+            .iter()
+            .filter(|value| value.count > 0)
+            .map(|value| (value.id.as_str(), value.count, value.selected))
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                ("à-traiter", 2, false),
+                ("à-relire", 1, true),
+                ("ci-rouge", 1, true),
+                ("en-attente", 1, false),
+                ("brouillon", 1, false),
+            ]
+        );
+        let types: Vec<(&str, u32, bool)> = page
+            .types
+            .iter()
+            .map(|tab| (tab.label.as_str(), tab.count, tab.active))
+            .collect();
+        assert_eq!(
+            types,
+            [
+                ("Tout", 2, false),
+                ("Pull requests", 2, true),
+                ("Issues", 0, false),
+                ("Tâches", 0, false),
+                ("Roadmap", 0, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_text_narrows_the_list() {
+        let page = snapshot_of(&pull_requests(), &typed("WAIT", &[])).page;
+        assert_eq!(groups(&page), [(None, "", vec!["waiting"])]);
+    }
+
+    #[test]
+    fn the_sidebar_counts_what_each_view_keeps() {
+        let mut config = config();
+        config.views.push(crate::config::SavedView {
+            id: "ci".to_owned(),
+            name: "CI".to_owned(),
+            query: "état:ci-rouge".to_owned(),
+            group: vec![GroupBy::Project],
+            sort: SortBy::default(),
+        });
+        let snapshot = build(
+            &pull_requests(),
+            &config,
+            &everything(),
+            now(),
+            Vec::new(),
+            None,
+        );
+        let views: Vec<(&str, u32, bool)> = snapshot
+            .sidebar
+            .views
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.count, entry.saved))
+            .collect();
+        assert_eq!(
+            views,
+            [
+                // The dependency update is left out of what waits for me.
+                ("view:action", 2, false),
+                ("view:today", 0, false),
+                ("view:reviews", 1, false),
+                ("view:prs", 5, false),
+                ("saved:ci", 1, true),
+            ]
+        );
+        let projects: Vec<(&str, u32)> = snapshot
+            .sidebar
+            .projects
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.count))
+            .collect();
+        assert_eq!(
+            projects,
+            [
+                ("projects", 2),
+                ("project:b", 1),
+                ("project:a", 1),
+                ("project:empty", 0)
+            ]
+        );
+        assert_eq!(snapshot.sidebar.projects[0].colors.len(), 3);
+    }
+
+    #[test]
+    fn the_home_page_shows_what_presses_and_what_has_a_date() {
+        let mut items = pull_requests();
+        let mut late = item("td:late", "a");
+        late.due = Some(Due::Date(date("2026-11-06")));
+        late.priority = Priority::P1;
+        let mut soon = item("td:soon", "b");
+        soon.due = Some(Due::Date(date("2026-11-10")));
+        let mut far = item("td:far", "b");
+        far.due = Some(Due::Date(date("2026-12-24")));
+        items.extend([late, soon, far]);
+
+        let home = snapshot(&items).home;
+
+        let stats: Vec<(&str, u32, bool)> = home
+            .stats
+            .iter()
+            .map(|stat| (stat.label.as_str(), stat.count, stat.alert))
+            .collect();
+        assert_eq!(
+            stats,
+            [
+                ("à traiter", 2, false),
+                ("en retard", 1, true),
+                ("pour aujourd'hui", 0, false),
+                ("reviews qui attendent", 1, false),
+            ]
+        );
+        assert_eq!(home.start_count, 2);
+
+        let cards: Vec<(&str, u32)> = home
+            .cards
+            .iter()
+            .map(|card| (card.name.as_str(), card.action_count))
+            .collect();
+        assert_eq!(cards, [("B", 1), ("A", 1)]);
+        let a = &home.cards[1];
+        let lines: Vec<(&str, &str)> = a
+            .lines
+            .iter()
+            .map(|line| (line.tag.as_str(), line.title.as_str()))
+            .collect();
+        // The late task first, then the red CI; the dependency update is not listed.
+        assert_eq!(
+            lines,
+            [
+                ("en retard de 2 j", "td:late"),
+                ("CI rouge", "ci"),
+                ("tâche", "task"),
+            ]
+        );
+        assert_eq!(a.lines[0].tone.as_deref(), Some("red"));
+        assert_eq!(
+            home.cards[0].footer.as_deref(),
+            Some("Prochaine échéance : td:soon, mar.")
+        );
+
+        let deadlines: Vec<(&str, &str, &str, bool)> = home
+            .deadlines
+            .iter()
+            .map(|deadline| {
+                (
+                    deadline.item_id.as_str(),
+                    deadline.big.as_str(),
+                    deadline.small.as_str(),
+                    deadline.overdue,
+                )
             })
             .collect();
         assert_eq!(
-            groups,
+            deadlines,
             [
-                ("inbox:review", vec!["review"]),
-                ("inbox:ci", vec!["ci"]),
-                ("inbox:waiting", vec!["waiting"]),
-                ("inbox:drafts", vec!["draft"]),
-                ("inbox:dependencies", vec!["bot"]),
+                ("td:late", "−2", "jours", true),
+                ("td:soon", "10", "mar.", false),
+                ("td:far", "24", "déc.", false),
             ]
         );
         assert_eq!(
-            snapshot.inbox[3].items[0].state_label.as_deref(),
-            Some("brouillon")
+            home.undated.as_deref(),
+            Some("6 éléments sur 9 n'ont pas de date : ils restent dans les cartes.")
         );
-        // What waits for me: the review and the failing CI, not my pull requests waiting for others.
-        assert_eq!(snapshot.inbox_count, 2);
     }
 }

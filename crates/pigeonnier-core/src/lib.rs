@@ -2,8 +2,8 @@
 
 //! The steps that turn remote services into a list: [`source`] fetches, [`map`] aligns field names,
 //! [`normalize`] applies the rules of each kind of item, [`filter`] selects, [`sort`] orders.
-//! [`view`] holds what to select and how to order as data, [`viewmodel`] prepares what the UIs draw
-//! and [`engine`] is the one interface the rest of the application talks to.
+//! [`query`] holds what the filter bar asks for as data, [`view`] runs it, [`viewmodel`] prepares
+//! what the UIs draw and [`engine`] is the one interface the rest of the application talks to.
 
 pub mod cache;
 pub mod config;
@@ -17,6 +17,7 @@ pub mod normalize;
 pub mod notify;
 pub mod oauth;
 pub mod paths;
+pub mod query;
 pub mod sort;
 pub mod source;
 pub mod view;

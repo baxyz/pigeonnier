@@ -6,6 +6,7 @@ use chrono::{DateTime, FixedOffset};
 use pigeonnier_core::cache::Cache;
 use pigeonnier_core::config::Config;
 use pigeonnier_core::engine::{Engine, EngineError, NewAction};
+use pigeonnier_core::query::everything;
 use pigeonnier_core::source::github::GithubClient;
 use pigeonnier_core::source::todoist::TodoistClient;
 use serde_json::{Value, json};
@@ -190,25 +191,27 @@ async fn sources_end_up_in_one_list_per_project() {
 
     assert_eq!(engine.refresh().await.unwrap(), []);
 
-    let snapshot = engine.snapshot("all", now()).unwrap();
-    assert_eq!(snapshot.projects.len(), 1);
-    let project = &snapshot.projects[0];
-    assert_eq!(project.id, "acme");
+    let snapshot = engine.snapshot(&everything(), now()).unwrap();
+    assert_eq!(snapshot.page.groups.len(), 1);
+    let project = &snapshot.page.groups[0];
+    assert_eq!(project.title, "Acme");
     let ids: Vec<_> = project.items.iter().map(|item| item.id.as_str()).collect();
-    // The late roadmap item first, then the P1 task, the review, and my PR ready to merge.
+    // The late roadmap item first, then the P1 task, the review, my PR ready to merge, and the
+    // dependency update last.
     assert_eq!(
         ids,
         [
             "gh-pv2:PVTI_1",
             "td:9",
             "gh-pr:acme/tool#1",
-            "gh-pr:acme/tool#3"
+            "gh-pr:acme/tool#3",
+            "gh-pr:acme/tool#2"
         ]
     );
     assert_eq!(project.items[0].due_urgency.as_deref(), Some("overdue"));
     assert_eq!(project.items[3].state_label.as_deref(), Some("à merger"));
-    assert_eq!(project.bots.as_ref().unwrap().items.len(), 1);
-    assert_eq!(project.action_count, 2);
+    let acme = &snapshot.sidebar.projects[1];
+    assert_eq!((acme.id.as_str(), acme.count), ("project:acme", 2));
     assert!(snapshot.badge.alert);
 }
 
@@ -227,8 +230,8 @@ async fn a_source_that_fails_keeps_its_last_answer_and_is_reported() {
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].source, "Todoist");
     assert!(issues[0].reconnect);
-    let snapshot = engine.snapshot("all", now()).unwrap();
-    assert_eq!(snapshot.projects[0].items.len(), 3);
+    let snapshot = engine.snapshot(&everything(), now()).unwrap();
+    assert_eq!(snapshot.page.total, 4);
     assert_eq!(snapshot.issues, issues);
 }
 
@@ -305,14 +308,14 @@ async fn a_pr_snoozes_locally() {
     ));
 
     let listed = |snapshot: pigeonnier_core::viewmodel::Snapshot| {
-        snapshot.projects[0]
+        snapshot.page.groups[0]
             .items
             .iter()
             .any(|item| item.id == "gh-pr:acme/tool#3")
     };
-    assert!(!listed(engine.snapshot("all", now()).unwrap()));
+    assert!(!listed(engine.snapshot(&everything(), now()).unwrap()));
     let later = DateTime::parse_from_rfc3339("2026-11-10T09:00:00+01:00").unwrap();
-    assert!(listed(engine.snapshot("all", later).unwrap()));
+    assert!(listed(engine.snapshot(&everything(), later).unwrap()));
 }
 
 #[tokio::test]

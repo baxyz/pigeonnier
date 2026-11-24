@@ -23,11 +23,6 @@ pub fn config_file() -> PathBuf {
 }
 
 #[must_use]
-pub fn views_file() -> PathBuf {
-    xdg("XDG_CONFIG_HOME", ".config").join("views.json")
-}
-
-#[must_use]
 pub fn cache_file() -> PathBuf {
     xdg("XDG_CACHE_HOME", ".cache").join("cache.sqlite")
 }

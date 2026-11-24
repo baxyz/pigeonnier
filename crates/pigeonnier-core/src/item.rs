@@ -156,6 +156,54 @@ impl Item {
             .is_some_and(|until| until > now.with_timezone(&Utc))
     }
 
+    /// What the item is, whichever search found it: `pr`, `issue`, `task` or `roadmap`.
+    #[must_use]
+    pub fn type_id(&self) -> &'static str {
+        match self.kind {
+            Kind::Review | Kind::MyPr => "pr",
+            Kind::Issue => "issue",
+            Kind::ClaudeAction | Kind::Todo => "task",
+            Kind::Roadmap => "roadmap",
+        }
+    }
+
+    /// The one state the item is in: `review`, `changes`, `ci`, `conflicts`, `merge`, `waiting`,
+    /// `draft` or `planned`.
+    #[must_use]
+    pub fn state_id(&self) -> &'static str {
+        match self.state {
+            State::ActionRequired(Reason::ToReview) => "review",
+            State::ActionRequired(Reason::ChangesRequested) => "changes",
+            State::ActionRequired(Reason::CiFailed) => "ci",
+            State::ActionRequired(Reason::Conflicts) => "conflicts",
+            State::ActionRequired(Reason::ToMerge) => "merge",
+            State::Waiting if self.draft => "draft",
+            State::Waiting => "waiting",
+            State::Planned => "planned",
+        }
+    }
+
+    /// Where the due date stands: `late`, `today`, `week` (the next seven days), `later`, or `none`
+    /// without a date. Unlike `overdue`, it is always there: "no date" is a value one can ask for.
+    #[must_use]
+    pub fn due_id(&self, now: DateTime<FixedOffset>) -> &'static str {
+        let Some(due) = self.effective_due() else {
+            return "none";
+        };
+        let days = (due.local_date(*now.offset()) - now.date_naive()).num_days();
+        match days {
+            _ if self.is_overdue(now) => "late",
+            0 => "today",
+            1..=7 => "week",
+            _ => "later",
+        }
+    }
+
+    #[must_use]
+    pub fn is_todoist(&self) -> bool {
+        self.id.starts_with("td:")
+    }
+
     /// The fields a view can filter and sort on. `overdue` and `due_today` stay absent without a
     /// date, so that "no date" is never mistaken for "not late"; `overdue_rank` exists for sorting,
     /// where an undated P1 must still come before a dated P4.
@@ -165,6 +213,17 @@ impl Item {
         let mut fields: std::collections::BTreeMap<String, Value> = [
             ("project", json!(self.project)),
             ("kind", json!(self.kind)),
+            ("type", json!(self.type_id())),
+            ("state", json!(self.state_id())),
+            ("due", json!(self.due_id(now))),
+            (
+                "source",
+                json!(if self.is_todoist() {
+                    "todoist"
+                } else {
+                    "github"
+                }),
+            ),
             ("title", json!(self.title)),
             ("priority", json!(self.priority.rank())),
             (
@@ -180,6 +239,10 @@ impl Item {
         .into_iter()
         .map(|(name, value)| (name.to_owned(), value))
         .collect();
+        if self.updated_at != DateTime::<Utc>::default() {
+            let age = (now.with_timezone(&Utc) - self.updated_at).num_days();
+            fields.insert("age_days".to_owned(), json!(age.max(0)));
+        }
         if let Some(due) = self.effective_due() {
             fields.insert("effective_due".to_owned(), json!(due.sort_text()));
             fields.insert("overdue".to_owned(), json!(overdue));

@@ -42,6 +42,23 @@ pub struct Config {
     /// The suggestions the person chose to ignore, by key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignored_suggestions: Vec<String>,
+    /// The views the person saved from the filter bar.
+    #[serde(default, rename = "view", skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<SavedView>,
+}
+
+/// A view saved from the filter bar: what it keeps, as typed, and how it is laid out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedView {
+    pub id: String,
+    pub name: String,
+    /// The filters as text, like `type:pr état:ci-rouge,conflits`.
+    #[serde(default)]
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group: Vec<crate::query::GroupBy>,
+    #[serde(default)]
+    pub sort: crate::query::SortBy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
