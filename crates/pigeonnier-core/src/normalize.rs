@@ -9,7 +9,7 @@ use chrono::{DateTime, Days, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Ut
 use serde_json::Value;
 
 use crate::config::{Config, Project, Roadmap};
-use crate::item::{Details, Due, Duration, Item, Kind, OTHERS, Priority, Reason, State};
+use crate::item::{Blocker, Details, Due, Duration, Item, Kind, OTHERS, Priority, Reason, State};
 use crate::map::{Mapping, Record};
 use crate::source::RawItem;
 use crate::source::todoist::SyncState;
@@ -38,6 +38,7 @@ static PR_MAPPING: LazyLock<Mapping> = LazyLock::new(|| {
         ("review", "/reviewDecision"),
         ("mergeable", "/mergeable"),
         ("ci", "/statusCheckRollup/state"),
+        ("checks", "/statusCheckRollup/contexts/nodes"),
         ("labels", "/labels/nodes"),
         ("author", "/author/login"),
         ("author_type", "/author/__typename"),
@@ -174,6 +175,44 @@ fn my_pr_state(record: &Record) -> State {
     State::Waiting
 }
 
+/// What keeps a pull request from being merged, read from GitHub whatever my part in it is.
+fn pr_blockers(record: &Record) -> Vec<Blocker> {
+    let mut blockers = Vec::new();
+    if record.text("mergeable") == Some("CONFLICTING") {
+        blockers.push(Blocker::Conflicts);
+    }
+    if matches!(record.text("ci"), Some("FAILURE" | "ERROR")) {
+        // A check run says how it ended, a commit status what state it is in.
+        let failed = |value: &Value| {
+            let ended = value["conclusion"].as_str().or(value["state"].as_str());
+            matches!(
+                ended,
+                Some(
+                    "FAILURE"
+                        | "ERROR"
+                        | "TIMED_OUT"
+                        | "CANCELLED"
+                        | "ACTION_REQUIRED"
+                        | "STARTUP_FAILURE"
+                )
+            )
+        };
+        let mut names: Vec<String> = record
+            .fields
+            .get("checks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|check| failed(check))
+            .filter_map(|check| check["name"].as_str().or(check["context"].as_str()))
+            .map(str::to_owned)
+            .collect();
+        names.dedup();
+        blockers.push(Blocker::Checks(names));
+    }
+    blockers
+}
+
 fn is_bot(record: &Record) -> bool {
     record.text("author_type") == Some("Bot")
         || record.text("author").is_some_and(|login| {
@@ -266,6 +305,7 @@ pub fn pull_request(raw: &RawItem, kind: Kind, context: &Context<'_>) -> Item {
         snoozed_until: None,
         details: None,
         draft: record.fields.get("draft") == Some(&Value::Bool(true)),
+        blockers: pr_blockers(&record),
         provenance: record.provenance,
     }
 }
@@ -325,6 +365,7 @@ pub fn github_issue(raw: &RawItem, context: &Context<'_>) -> Option<Item> {
         snoozed_until: None,
         details: None,
         draft: false,
+        blockers: Vec::new(),
         provenance: record.provenance,
     })
 }
@@ -405,6 +446,7 @@ pub fn roadmap_item(raw: &RawItem, project: &Project, context: &Context<'_>) -> 
         snoozed_until: None,
         details: None,
         draft: false,
+        blockers: Vec::new(),
         provenance: record.provenance,
     })
 }
@@ -506,6 +548,7 @@ pub fn todoist_item(raw: &RawItem, sync: &SyncState, context: &Context<'_>) -> O
         snoozed_until: None,
         details: Some(details),
         draft: false,
+        blockers: Vec::new(),
         provenance: record.provenance,
     })
 }
@@ -584,6 +627,37 @@ mod tests {
         let mine = json!({ "repository": {
             "name": "x", "nameWithOwner": "me/x", "owner": { "login": "me" } } });
         assert_eq!(normalize_pr(&mine, Kind::MyPr).project, "perso");
+    }
+
+    #[test]
+    fn a_review_says_what_keeps_the_pr_from_being_merged() {
+        let broken = json!({
+            "mergeable": "CONFLICTING",
+            "statusCheckRollup": { "state": "FAILURE", "contexts": { "nodes": [
+                { "name": "build", "conclusion": "SUCCESS" },
+                { "name": "OSV-Scanner / osv-scan", "conclusion": "FAILURE" },
+                { "context": "ci/legacy", "state": "ERROR" },
+                {}
+            ] } }
+        });
+        let item = normalize_pr(&broken, Kind::Review);
+        assert_eq!(item.state, State::ActionRequired(Reason::ToReview));
+        assert_eq!(
+            item.blockers,
+            [
+                Blocker::Conflicts,
+                Blocker::Checks(vec![
+                    "OSV-Scanner / osv-scan".to_owned(),
+                    "ci/legacy".to_owned()
+                ])
+            ]
+        );
+        let red = json!({ "statusCheckRollup": { "state": "ERROR" } });
+        assert_eq!(
+            normalize_pr(&red, Kind::Review).blockers,
+            [Blocker::Checks(Vec::new())]
+        );
+        assert_eq!(normalize_pr(&json!({}), Kind::Review).blockers, []);
     }
 
     #[test]
