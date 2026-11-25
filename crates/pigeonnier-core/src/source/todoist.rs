@@ -81,6 +81,10 @@ pub enum TodoistCommand {
         date: String,
         string: Option<String>,
     },
+    AddSection {
+        name: String,
+        project_id: String,
+    },
     Add {
         content: String,
         project_id: Option<String>,
@@ -106,6 +110,12 @@ impl TodoistCommand {
                 }
                 json!({ "type": "item_update", "uuid": uuid, "args": { "id": id, "due": due } })
             }
+            Self::AddSection { name, project_id } => json!({
+                "type": "section_add",
+                "uuid": uuid,
+                "temp_id": uuid::Uuid::new_v4().to_string(),
+                "args": { "name": name, "project_id": project_id },
+            }),
             Self::Add {
                 content,
                 project_id,

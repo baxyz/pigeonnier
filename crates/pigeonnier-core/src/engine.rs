@@ -558,6 +558,41 @@ impl Engine {
         Ok(())
     }
 
+    /// Creates a section in a Todoist project, found by name, unless one of that name is there.
+    ///
+    /// # Errors
+    /// No Todoist connection, an unknown project, or a service failure.
+    pub async fn add_section(&self, project: &str, name: &str) -> Result<(), EngineError> {
+        let todoist = self
+            .todoist
+            .as_ref()
+            .ok_or(EngineError::NotConnected("Todoist"))?;
+        let state = self.sync_todoist(todoist).await?;
+        let project_id = state
+            .projects
+            .values()
+            .filter(|known| !is_archived(known))
+            .find(|known| known["name"].as_str() == Some(project))
+            .and_then(|known| known["id"].as_str())
+            .ok_or_else(|| EngineError::UnknownParent(project.to_owned()))?
+            .to_owned();
+        let exists = state.sections.values().any(|section| {
+            section["project_id"].as_str() == Some(&project_id)
+                && section["name"].as_str() == Some(name)
+                && !is_archived(section)
+        });
+        if !exists {
+            todoist
+                .command(&TodoistCommand::AddSection {
+                    name: name.to_owned(),
+                    project_id,
+                })
+                .await?;
+            self.sync_todoist(todoist).await?;
+        }
+        Ok(())
+    }
+
     /// Adds a task from natural language: `relire la doc vendredi p2`. With a project, it goes to
     /// that project's section; without, Todoist puts it in its inbox.
     ///
