@@ -815,12 +815,12 @@ impl<'a> Board<'a> {
         }
     }
 
-    /// What waits for me in a project, dependency updates aside.
+    /// What waits for me in a project, dependency updates included: a review asked of me is mine
+    /// to do, whoever opened the pull request.
     fn action_count(&self, project: Option<&str>) -> u32 {
         count(self.live.iter().filter(|(item, _)| {
             project.is_none_or(|id| item.project == id)
                 && matches!(item.state, State::ActionRequired(_))
-                && !item.bot
                 && !item.is_snoozed(self.now)
         }))
     }
@@ -953,7 +953,7 @@ impl<'a> Board<'a> {
                 let own: Vec<&Item> = everything
                     .iter()
                     .copied()
-                    .filter(|item| item.project == id && !item.bot)
+                    .filter(|item| item.project == id)
                     .collect();
                 if own.is_empty() {
                     return None;
@@ -1653,10 +1653,10 @@ mod tests {
         assert_eq!(
             views,
             [
-                // The dependency update is left out of what waits for me.
-                ("view:action", 2, false),
+                // The dependency update waits for me like any review.
+                ("view:action", 3, false),
                 ("view:today", 0, false),
-                ("view:reviews", 1, false),
+                ("view:reviews", 2, false),
                 ("view:prs", 5, false),
                 ("saved:ci", 1, true),
             ]
@@ -1670,9 +1670,9 @@ mod tests {
         assert_eq!(
             projects,
             [
-                ("projects", 2),
+                ("projects", 3),
                 ("project:b", 1),
-                ("project:a", 1),
+                ("project:a", 2),
                 ("project:empty", 0)
             ]
         );
@@ -1701,33 +1701,33 @@ mod tests {
         assert_eq!(
             stats,
             [
-                ("à traiter", 2, false),
+                ("à traiter", 3, false),
                 ("en retard", 1, true),
                 ("pour aujourd'hui", 0, false),
-                ("reviews qui attendent", 1, false),
+                ("reviews qui attendent", 2, false),
             ]
         );
-        assert_eq!(home.start_count, 2);
+        assert_eq!(home.start_count, 3);
 
         let cards: Vec<(&str, u32)> = home
             .cards
             .iter()
             .map(|card| (card.name.as_str(), card.action_count))
             .collect();
-        assert_eq!(cards, [("B", 1), ("A", 1)]);
+        assert_eq!(cards, [("B", 1), ("A", 2)]);
         let a = &home.cards[1];
         let lines: Vec<(&str, &str)> = a
             .lines
             .iter()
             .map(|line| (line.tag.as_str(), line.title.as_str()))
             .collect();
-        // The late task first, then the red CI; the dependency update is not listed.
+        // The late task first, then the red CI, then the dependency update that waits for me.
         assert_eq!(
             lines,
             [
                 ("en retard de 2 j", "td:late"),
                 ("CI rouge", "ci"),
-                ("tâche", "task"),
+                ("à relire", "bot"),
             ]
         );
         assert_eq!(a.lines[0].tone.as_deref(), Some("red"));
