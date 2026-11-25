@@ -37,3 +37,5 @@ list.items > row { border-bottom: 1px solid alpha(currentColor, 0.07); }
 button.home-card { padding: 14px 16px; font-weight: normal; }
 .deadlines { padding: 14px 12px; }
 button.deadline { padding: 6px 4px; font-weight: normal; }
+.blockers { padding: 10px 14px; background: alpha(@error_bg_color, 0.10); }
+.blockers .heading, .blockers image { color: @error_color; }

@@ -83,12 +83,20 @@ impl App {
         if let Some(state) = &item.state_label {
             badges.append(&badge(state, item.state_tone.as_deref()));
         }
+        if let Some(blocked) = &item.blocked_label {
+            badges.append(&badge(blocked, Some("red")));
+        }
         if let Some(label) = due(item, false) {
             label.add_css_class("state-badge");
             badges.append(&label);
         }
         if badges.first_child().is_some() {
             self.detail.append(&badges);
+        }
+
+        // What keeps a pull request from being merged comes before anything else to read.
+        if let Some(card) = blockers_card(&item.details.blockers) {
+            self.detail.append(&card);
         }
 
         match item.details.description.as_deref().map(str::trim) {
@@ -221,4 +229,26 @@ impl App {
         self.detail_content(&item);
         self.detail_actions(&item);
     }
+}
+
+/// A red card that says why a pull request cannot be merged, or nothing when it can.
+fn blockers_card(blockers: &[String]) -> Option<gtk::Box> {
+    if blockers.is_empty() {
+        return None;
+    }
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    card.add_css_class("card");
+    card.add_css_class("blockers");
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    head.append(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
+    let title = text_label("Ne peut pas être mergée");
+    title.add_css_class("heading");
+    head.append(&title);
+    card.append(&head);
+    for blocker in blockers {
+        let line = text_label(blocker);
+        line.set_selectable(true);
+        card.append(&line);
+    }
+    Some(card)
 }

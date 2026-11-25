@@ -261,6 +261,9 @@ fn item_row(item: &ItemVm, with_project: bool) -> gtk::ListBoxRow {
     subtitle.add_css_class("dim-label");
     text.append(&subtitle);
     line.append(&text);
+    if let Some(blocked) = &item.blocked_label {
+        line.append(&badge(blocked, Some("red")));
+    }
     if let Some(state) = &item.state_label {
         line.append(&badge(state, item.state_tone.as_deref()));
     }
