@@ -101,6 +101,14 @@ enum Msg {
     LoadPreferences,
     PreferencesLoaded(Result<(Config, Choices), String>),
     EditProject(usize, Edit),
+    /// A project name being typed: kept, so that drawing the page again does not lose it, and
+    /// saved with the next edit or when the preferences close.
+    NameTyped(usize, String),
+    SortProjects,
+    /// Creates a section in a Todoist project, `(project, Todoist project, section)`, for that
+    /// project to use.
+    CreateSection(usize, String, String),
+    SectionCreated(usize, String, String, Result<(), String>),
     EditDefaults(DefaultsEdit),
     AddProject,
     Propose(Option<String>),
@@ -191,6 +199,8 @@ struct App {
     config: Option<Config>,
     /// The configuration changed since the preferences opened: refresh when they close.
     config_changed: bool,
+    /// The project whose typed name is not saved yet.
+    name_typed: Option<usize>,
     suggestions: Vec<Suggestion>,
     choices: Option<Choices>,
     choices_error: Option<String>,
@@ -885,6 +895,7 @@ impl SimpleComponent for App {
             preferences: None,
             config: None,
             config_changed: false,
+            name_typed: None,
             suggestions: Vec::new(),
             choices: None,
             choices_error: None,
@@ -1165,6 +1176,9 @@ impl SimpleComponent for App {
             Msg::PreferencesClosed => {
                 self.preferences = None;
                 self.expanded = None;
+                if self.name_typed.take().is_some() {
+                    self.commit(&sender, false);
+                }
                 if std::mem::take(&mut self.config_changed) {
                     service::refresh();
                 }
@@ -1234,13 +1248,77 @@ impl SimpleComponent for App {
                 }
                 self.draw_preferences();
             }
+            Msg::CreateSection(index, parent, name) => {
+                let name = name.trim().to_owned();
+                if name.is_empty() {
+                    return;
+                }
+                let sender = sender.clone();
+                relm4::spawn(async move {
+                    let result = service::add_section(parent.clone(), name.clone()).await;
+                    sender.input(Msg::SectionCreated(index, parent, name, result));
+                });
+            }
+            Msg::SectionCreated(index, parent, name, result) => {
+                if let Err(error) = result {
+                    self.toast(&format!("Section non créée : {error}"));
+                    return;
+                }
+                if let Some(choice) = self.choices.as_mut().and_then(|choices| {
+                    choices
+                        .todoist
+                        .iter_mut()
+                        .find(|known| known.name == parent)
+                }) && !choice.sections.contains(&name)
+                {
+                    choice.sections.push(name.clone());
+                }
+                let Some(config) = &mut self.config else {
+                    return;
+                };
+                settings::apply(config, index, Edit::Section(Some((parent, name.clone()))));
+                self.toast(&format!("Section « {name} » créée"));
+                self.commit(&sender, true);
+            }
+            Msg::SortProjects => {
+                let Some(config) = &mut self.config else {
+                    return;
+                };
+                let previous = config.clone();
+                settings::sort_projects(config);
+                if *config != previous {
+                    self.expanded = None;
+                    self.toast_undo("Projets triés par nom", previous);
+                    self.commit(&sender, true);
+                }
+            }
+            Msg::NameTyped(index, name) => {
+                if let Some(project) = self
+                    .config
+                    .as_mut()
+                    .and_then(|config| config.projects.get_mut(index))
+                    && project.name != name
+                {
+                    project.name = name;
+                    self.name_typed = Some(index);
+                }
+            }
             Msg::EditProject(index, edit) => {
+                self.name_typed = None;
                 let Some(config) = &mut self.config else {
                     return;
                 };
                 let previous = config.clone();
                 let removed = matches!(edit, Edit::Remove);
+                // The project that moves stays open.
+                let moved = match edit {
+                    Edit::Move(step) => index.checked_add_signed(step),
+                    _ => None,
+                };
                 let redraw = settings::apply(config, index, edit);
+                if redraw && let Some(target) = moved {
+                    self.expanded = Some(target);
+                }
                 if removed {
                     self.expanded = None;
                     self.toast_undo("Projet retiré", previous);

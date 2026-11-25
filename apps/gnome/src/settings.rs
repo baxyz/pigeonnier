@@ -4,7 +4,7 @@
 //! editing rules are plain functions; the drawing is in [`App::draw_settings`].
 
 use pigeonnier_core::config::{
-    Config, GithubLink, IssueScope, Project, TodoistLink, normalize_name,
+    Config, GithubLink, IssueScope, Project, TodoistLink, TodoistOthers, normalize_name,
 };
 use pigeonnier_core::discover;
 use pigeonnier_core::engine::Choices;
@@ -287,6 +287,8 @@ pub enum Edit {
     Issues(Option<IssueScope>),
     GithubProject(Option<u32>),
     Section(Option<(String, String)>),
+    /// One place up (`-1`) or down (`1`) in the list, which is the order everywhere.
+    Move(isize),
     Remove,
 }
 
@@ -338,8 +340,25 @@ pub fn apply(config: &mut Config, index: usize, edit: Edit) -> bool {
             });
             false
         }
+        Edit::Move(step) => {
+            let target = index.checked_add_signed(step);
+            match target {
+                Some(target) if target < config.projects.len() => {
+                    config.projects.swap(index, target);
+                    true
+                }
+                _ => false,
+            }
+        }
         Edit::Remove => true,
     }
+}
+
+/// Puts the projects in the order of their names, accents and case aside.
+pub fn sort_projects(config: &mut Config) {
+    config
+        .projects
+        .sort_by_cached_key(|project| normalize_name(&project.name));
 }
 
 /// A change on the "Application" page.
@@ -351,6 +370,7 @@ pub enum DefaultsEdit {
     EscalationDays(u32),
     Refresh(&'static str),
     ClaudeLabel(String),
+    TodoistOthers(TodoistOthers),
 }
 
 /// How often to refresh: `(value in the configuration, label)`.
@@ -371,6 +391,7 @@ pub fn apply_defaults(config: &mut Config, edit: DefaultsEdit) {
         DefaultsEdit::EscalationDays(days) => defaults.review_escalation_days = days,
         DefaultsEdit::Refresh(every) => every.clone_into(&mut defaults.refresh),
         DefaultsEdit::ClaudeLabel(label) => label.trim().clone_into(&mut defaults.claude_label),
+        DefaultsEdit::TodoistOthers(others) => defaults.todoist_others = others,
     }
 }
 
@@ -513,6 +534,14 @@ impl App {
     }
 
     /// Shows a message in the preferences, with a button that puts `previous` back.
+    pub(crate) fn toast(&self, title: &str) {
+        if let Some(preferences) = &self.preferences {
+            preferences
+                .dialog
+                .add_toast(adw::Toast::new(&escape(title)));
+        }
+    }
+
     pub(crate) fn toast_undo(&self, title: &str, previous: Config) {
         let Some(preferences) = &self.preferences else {
             return;
@@ -621,6 +650,14 @@ impl App {
         for (index, project) in config.projects.iter().enumerate() {
             group.add(&self.project_editor(config, choices, index, project));
         }
+        if config.projects.len() > 1 {
+            let sort = adw::ButtonRow::new();
+            sort.set_title("Trier par nom");
+            sort.set_start_icon_name(Some("view-sort-ascending-symbolic"));
+            let sender = self.sender.clone();
+            sort.connect_activated(move |_| sender.input(Msg::SortProjects));
+            group.add(&sort);
+        }
         let add = adw::ButtonRow::new();
         add.set_title("Ajouter un projet");
         add.set_start_icon_name(Some("list-add-symbolic"));
@@ -628,8 +665,54 @@ impl App {
         add.connect_activated(move |_| sender.input(Msg::AddProject));
         group.add(&add);
         groups.push(group);
+        if !choices.todoist.is_empty() {
+            groups.push(self.todoist_others_group(choices, config));
+        }
         groups.push(self.proposal_group(choices, config));
         groups
+    }
+
+    /// Which Todoist tasks outside the projects still come in, under "Autres".
+    fn todoist_others_group(&self, choices: &Choices, config: &Config) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Autres tâches Todoist");
+        group.set_description(Some(
+            "Les tâches des sections de tes projets viennent toujours. Les autres arrivent dans « Autres » seulement si tu le choisis ici.",
+        ));
+        let mut values = vec![TodoistOthers::None, TodoistOthers::All];
+        values.extend(
+            choices
+                .todoist
+                .iter()
+                .map(|project| TodoistOthers::Project(project.name.clone())),
+        );
+        let current = &config.defaults.todoist_others;
+        if !values.contains(current) {
+            values.push(current.clone());
+        }
+        let labels: Vec<String> = values
+            .iter()
+            .map(|value| match value {
+                TodoistOthers::None => "Aucune".to_owned(),
+                TodoistOthers::All => "Toutes".to_owned(),
+                TodoistOthers::Project(name) => format!("Celles de « {name} »"),
+            })
+            .collect();
+        let selected_now = values
+            .iter()
+            .position(|value| value == current)
+            .unwrap_or(0);
+        let row = combo("Tâches hors de mes projets", &labels, selected_now);
+        let sender = self.sender.clone();
+        row.connect_selected_notify(move |row| {
+            if let Some(value) = values.get(selected(row)) {
+                sender.input(Msg::EditDefaults(DefaultsEdit::TodoistOthers(
+                    value.clone(),
+                )));
+            }
+        });
+        group.add(&row);
+        group
     }
 
     fn suggestions_group(&self) -> adw::PreferencesGroup {
@@ -878,6 +961,70 @@ impl App {
         ));
     }
 
+    /// The Todoist section of a project: one to choose, or a new one to create.
+    fn todoist_rows(
+        &self,
+        expander: &adw::ExpanderRow,
+        config: &Config,
+        choices: &Choices,
+        index: usize,
+        project: &Project,
+    ) {
+        let mut sections: Vec<((String, String), String)> = section_options(choices)
+            .into_iter()
+            .map(|(project, section)| {
+                let label = format!("{project} / {section}");
+                ((project, section), label)
+            })
+            .collect();
+        let plain: Vec<(String, String)> =
+            sections.iter().map(|(value, _)| value.clone()).collect();
+        let mut current = project
+            .todoist
+            .as_ref()
+            .and_then(|link| section_index(&plain, config, link));
+        if let Some(link) = &project.todoist
+            && current.is_none()
+        {
+            let name = todoist_project(config, link).unwrap_or_default().to_owned();
+            let label = format!("{name} / {}", link.section);
+            sections.push(((name, link.section.clone()), label));
+            current = Some(sections.len() - 1);
+        }
+        expander.add_row(&self.choice_row(
+            ("Section Todoist", "Aucune"),
+            sections,
+            current,
+            index,
+            Edit::Section,
+        ));
+
+        // Or a new section, in the Todoist project that holds the others.
+        let parent = project
+            .todoist
+            .as_ref()
+            .and_then(|link| todoist_project(config, link))
+            .map(str::to_owned)
+            .or_else(|| config.defaults.todoist_parent.clone())
+            .or_else(|| guess_parent(choices))
+            .or_else(|| choices.todoist.first().map(|known| known.name.clone()));
+        if let Some(parent) = parent.filter(|_| !choices.todoist.is_empty()) {
+            let create = adw::EntryRow::new();
+            create.set_title(&escape(&format!("Nouvelle section dans « {parent} »")));
+            create.set_show_apply_button(true);
+            create.set_tooltip_text(Some("Crée la section dans Todoist et l'associe au projet"));
+            let sender = self.sender.clone();
+            create.connect_apply(move |entry| {
+                sender.input(Msg::CreateSection(
+                    index,
+                    parent.clone(),
+                    entry.text().to_string(),
+                ));
+            });
+            expander.add_row(&create);
+        }
+    }
+
     fn project_editor(
         &self,
         config: &Config,
@@ -900,6 +1047,11 @@ impl App {
         name.set_text(&project.name);
         // Applied on Enter: drawing the page again while typing would take the focus away.
         name.set_show_apply_button(true);
+        let (sender, title) = (self.sender.clone(), expander.clone());
+        name.connect_changed(move |entry| {
+            title.set_title(&escape(&entry.text()));
+            sender.input(Msg::NameTyped(index, entry.text().to_string()));
+        });
         let sender = self.sender.clone();
         name.connect_apply(move |entry| {
             sender.input(Msg::EditProject(
@@ -936,34 +1088,28 @@ impl App {
             self.github_rows(&expander, config, choices, index, link);
         }
 
-        let mut sections: Vec<((String, String), String)> = section_options(choices)
-            .into_iter()
-            .map(|(project, section)| {
-                let label = format!("{project} / {section}");
-                ((project, section), label)
-            })
-            .collect();
-        let plain: Vec<(String, String)> =
-            sections.iter().map(|(value, _)| value.clone()).collect();
-        let mut current = project
-            .todoist
-            .as_ref()
-            .and_then(|link| section_index(&plain, config, link));
-        if let Some(link) = &project.todoist
-            && current.is_none()
-        {
-            let name = todoist_project(config, link).unwrap_or_default().to_owned();
-            let label = format!("{name} / {}", link.section);
-            sections.push(((name, link.section.clone()), label));
-            current = Some(sections.len() - 1);
+        self.todoist_rows(&expander, config, choices, index, project);
+
+        // Up and down: the order of this list is the order of the sidebar and the home page.
+        let count = config.projects.len();
+        let order = adw::ActionRow::new();
+        order.set_title("Position");
+        order.set_subtitle(&format!("{} sur {count}", index + 1));
+        for (icon, tip, step, enabled) in [
+            ("go-up-symbolic", "Monter", -1, index > 0),
+            ("go-down-symbolic", "Descendre", 1, index + 1 < count),
+        ] {
+            let button = gtk::Button::from_icon_name(icon);
+            button.add_css_class("flat");
+            button.set_valign(gtk::Align::Center);
+            button.set_tooltip_text(Some(tip));
+            button.set_sensitive(enabled);
+            let sender = self.sender.clone();
+            button
+                .connect_clicked(move |_| sender.input(Msg::EditProject(index, Edit::Move(step))));
+            order.add_suffix(&button);
         }
-        expander.add_row(&self.choice_row(
-            ("Section Todoist", "Aucune"),
-            sections,
-            current,
-            index,
-            Edit::Section,
-        ));
+        expander.add_row(&order);
 
         let remove = adw::ButtonRow::new();
         remove.set_title("Retirer ce projet");
@@ -1044,6 +1190,29 @@ mod tests {
         let mut lonely = choices();
         lonely.todoist[0].sections = vec!["Courses".to_owned()];
         assert_eq!(guess_parent(&lonely), None);
+    }
+
+    #[test]
+    fn projects_move_one_place_or_sort_by_name() {
+        let mut config = Config::default();
+        for (index, name) in ["Zen", "écrits", "Brig-id"].into_iter().enumerate() {
+            let mut project = new_project(index);
+            name.clone_into(&mut project.name);
+            config.projects.push(project);
+        }
+        let names = |config: &Config| -> Vec<String> {
+            config
+                .projects
+                .iter()
+                .map(|project| project.name.clone())
+                .collect()
+        };
+        assert!(apply(&mut config, 2, Edit::Move(-1)));
+        assert_eq!(names(&config), ["Zen", "Brig-id", "écrits"]);
+        assert!(!apply(&mut config, 0, Edit::Move(-1)));
+        assert!(!apply(&mut config, 2, Edit::Move(1)));
+        sort_projects(&mut config);
+        assert_eq!(names(&config), ["Brig-id", "écrits", "Zen"]);
     }
 
     #[test]
