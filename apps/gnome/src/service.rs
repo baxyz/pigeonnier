@@ -277,6 +277,17 @@ pub async fn apply_config(config: Config, choices: Choices) -> Result<Vec<Sugges
     engine.suggestions(&choices, now()).map_err(readable)
 }
 
+/// Creates a Todoist section, for a project to use.
+pub async fn add_section(project: String, name: String) -> Result<(), String> {
+    service()?
+        .engine
+        .read()
+        .await
+        .add_section(&project, &name)
+        .await
+        .map_err(readable)
+}
+
 /// What the settings can suggest with the configuration in use.
 pub async fn suggestions(choices: Choices) -> Result<Vec<Suggestion>, String> {
     service()?
