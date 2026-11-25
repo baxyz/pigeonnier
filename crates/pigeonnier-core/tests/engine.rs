@@ -211,7 +211,7 @@ async fn sources_end_up_in_one_list_per_project() {
     assert_eq!(project.items[0].due_urgency.as_deref(), Some("overdue"));
     assert_eq!(project.items[3].state_label.as_deref(), Some("à merger"));
     let acme = &snapshot.sidebar.projects[1];
-    assert_eq!((acme.id.as_str(), acme.count), ("project:acme", 2));
+    assert_eq!((acme.id.as_str(), acme.count), ("project:acme", 3));
     assert!(snapshot.badge.alert);
 }
 

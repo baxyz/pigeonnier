@@ -477,7 +477,7 @@ pub const PRESETS: [(&str, &str, &str, &str, &[GroupBy]); 4] = [
         "action",
         "À traiter",
         "mail-unread-symbolic",
-        "état:à-traiter -auteur:robot",
+        "état:à-traiter",
         &[GroupBy::Project],
     ),
     (
@@ -491,7 +491,7 @@ pub const PRESETS: [(&str, &str, &str, &str, &[GroupBy]); 4] = [
         "reviews",
         "Mes reviews",
         "avatar-default-symbolic",
-        "état:à-relire -auteur:robot",
+        "état:à-relire",
         &[GroupBy::Project],
     ),
     (
