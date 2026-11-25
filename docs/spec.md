@@ -24,7 +24,9 @@ that repository's pull requests and issues away from the project of its owner. A
 to me that no project lists goes to "Autres"; a Todoist task outside the projects' sections only
 does when the settings ask for it (all of them, or those of one Todoist project), since a whole
 Todoist account buries what matters. The order of the projects in the settings is their order
-everywhere. The app proposes projects on the first run and lets every one of
+everywhere. With « Projets par jour », off by default, projects have days of the week (none:
+every day) and the window shows the projects of one day, today at launch; the others wait on the
+home page, in one line each, with what presses there anyway. The app proposes projects on the first run and lets every one of
 them be fixed by hand.
 
 ## Principles

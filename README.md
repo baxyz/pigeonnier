@@ -41,11 +41,16 @@ The window opens on a welcome page; **Configurer Pigeonnier** opens the preferen
 2. **Projets**: **Proposer mes projets** makes one project per GitHub account and organization,
    paired with the Todoist section of the same name. Open a project to change its name, narrow it
    to one repository, choose its issues, its GitHub Project or its Todoist section, or create a new
-   section; move it up or down, or sort them all by name. **Autres tâches Todoist** says which tasks
+   section. Drag a project by its handle to its place (or use the arrows in its editor); the button
+   beside the title sorts them all by name. **Autres tâches Todoist** says which tasks
    outside the projects still come in: none (the default), all, or those of one Todoist project.
    Suggestions offer the projects and links that are missing, from what the accounts see and what
    lands in "Autres"; each can be applied or ignored.
-3. **Application**: the issues listed by default, which pull requests to list, when a waiting
+3. **Semaine**: **Projets par jour** gives each project its days, in a grid of the week (or in
+   the editor of the project); a project with no day is there every day. The sidebar then offers a
+   day, today at launch, or every day; the lists and the home page only show the projects of that
+   day, and the home page lists the others in one line each, with what presses there anyway.
+4. **Application**: the issues listed by default, which pull requests to list, when a waiting
    review becomes urgent, how often to refresh.
 
 Every change applies at once; the list behind follows, and the services are read again when the
