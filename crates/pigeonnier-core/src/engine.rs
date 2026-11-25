@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cache::{Cache, CacheError};
-use crate::config::Config;
 use crate::config::IssueScope;
+use crate::config::{Config, Day};
 use crate::discover;
 use crate::item::{Item, Kind, Priority, Reason, State};
 use crate::normalize::{Context, github_issue, pull_request, roadmap_item, todoist_item};
@@ -417,12 +417,14 @@ impl Engine {
     pub fn snapshot(
         &self,
         spec: &ViewSpec,
+        day: Option<Day>,
         now: DateTime<FixedOffset>,
     ) -> Result<Snapshot, CacheError> {
         let mut snapshot = viewmodel::build(
             &self.items(now)?,
             &self.config,
             spec,
+            day,
             now,
             self.cache.get(KEY_ISSUES)?.unwrap_or_default(),
             self.cache.get(KEY_REFRESHED)?,

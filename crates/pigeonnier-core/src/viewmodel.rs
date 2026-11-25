@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::{Config, Day, Project};
 use crate::item::{Blocker, Due, Duration, Item, Kind, OTHERS, Priority, Reason, State};
 use crate::map::Record;
 use crate::query::{self, Field, Filter, GroupBy, PRESETS, Query, ViewSpec};
@@ -27,6 +27,15 @@ pub struct Snapshot {
     pub badge: Badge,
     pub issues: Vec<Issue>,
     pub refreshed_at: Option<DateTime<Utc>>,
+    /// Present when projects have days: the UI offers a choice of day.
+    pub day_bar: Option<DayBar>,
+}
+
+/// The choice of day, when projects have days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DayBar {
+    /// The day shown; `None` for every day.
+    pub day: Option<Day>,
 }
 
 /// The entries of the sidebar. Each one is a saved filter: choosing it fills the filter bar.
@@ -34,6 +43,8 @@ pub struct Snapshot {
 pub struct Sidebar {
     pub views: Vec<Entry>,
     pub projects: Vec<Entry>,
+    /// "Projets du jeudi" when one day is shown, else "Projets".
+    pub projects_title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +131,31 @@ pub struct Home {
     pub undated: Option<String>,
     /// How many items "Commencer" would go through.
     pub start_count: u32,
+    /// The day shown, when projects have days and one was chosen.
+    pub day: Option<DayHome>,
+}
+
+/// The top of the home page on one day, and the projects that wait for another day.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DayHome {
+    /// "Mercredi"
+    pub title: String,
+    /// "Arnaud Work, baxyz · et Fajro tous les jours"
+    pub subtitle: String,
+    pub resting: Vec<Resting>,
+}
+
+/// A project that is not worked on the day shown, in one line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resting {
+    pub entry: String,
+    pub name: String,
+    pub color: String,
+    pub action_count: u32,
+    /// What presses anyway, in a word or two: "conflits", "en retard de 2 j".
+    pub urgent: Option<String>,
+    /// Its next day: "jeu."
+    pub next: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,7 +434,7 @@ struct Projects<'a> {
     config: &'a Config,
 }
 
-impl Projects<'_> {
+impl<'a> Projects<'a> {
     fn muted(&self, id: &str) -> bool {
         self.config
             .projects
@@ -422,7 +458,7 @@ impl Projects<'_> {
     }
 
     /// The projects shown, in their order.
-    fn shown(&self) -> Vec<&crate::config::Project> {
+    fn shown(&self) -> Vec<&'a crate::config::Project> {
         let mut shown: Vec<_> = self
             .config
             .projects
@@ -628,17 +664,27 @@ fn group_of(
 struct Board<'a> {
     config: &'a Config,
     projects: Projects<'a>,
-    /// The items of the projects that are not muted, with the fields a query reads.
+    /// The items of the projects that are not muted, and are worked on the day shown, with the
+    /// fields a query reads.
     live: Vec<(&'a Item, Record)>,
     now: DateTime<FixedOffset>,
+    /// The day shown; `None` shows every project.
+    day: Option<Day>,
 }
 
 impl<'a> Board<'a> {
-    fn new(items: &'a [Item], config: &'a Config, now: DateTime<FixedOffset>) -> Self {
+    fn new(
+        items: &'a [Item],
+        config: &'a Config,
+        now: DateTime<FixedOffset>,
+        day: Option<Day>,
+    ) -> Self {
         let projects = Projects { config };
+        let day = day.filter(|_| config.defaults.by_day);
+        let on = |id: &str| on_day(config, day, id);
         let live = items
             .iter()
-            .filter(|item| !projects.muted(&item.project))
+            .filter(|item| !projects.muted(&item.project) && on(&item.project))
             .map(|item| (item, item.to_record(now)))
             .collect();
         Self {
@@ -646,7 +692,19 @@ impl<'a> Board<'a> {
             projects,
             live,
             now,
+            day,
         }
+    }
+
+    /// The projects shown on the day shown, in their order.
+    fn shown(&self) -> Vec<&'a Project> {
+        let config = self.config;
+        let day = self.day;
+        Projects { config }
+            .shown()
+            .into_iter()
+            .filter(|project| day.is_none_or(|day| project.on(day)))
+            .collect()
     }
 
     /// What a view keeps, in its order.
@@ -857,7 +915,7 @@ impl<'a> Board<'a> {
                 spec,
             }
         }));
-        let shown = self.projects.shown();
+        let shown = self.shown();
         let mut projects = vec![Entry {
             id: "projects".to_owned(),
             title: "Tous".to_owned(),
@@ -889,7 +947,15 @@ impl<'a> Board<'a> {
                     spec: query::project(id),
                 }),
         );
-        Sidebar { views, projects }
+        let projects_title = match self.day {
+            Some(day) => format!("Projets du {}", day.name()),
+            None => "Projets".to_owned(),
+        };
+        Sidebar {
+            views,
+            projects,
+            projects_title,
+        }
     }
 
     fn stats(&self) -> Vec<Stat> {
@@ -939,7 +1005,7 @@ impl<'a> Board<'a> {
     /// A card for each project that has something to show, dependency updates aside.
     fn cards(&self, everything: &[&Item]) -> Vec<Card> {
         let others = self.has_items(OTHERS).then_some((OTHERS, "Autres", "gray"));
-        let shown = self.projects.shown();
+        let shown = self.shown();
         let known = shown.iter().map(|project| {
             (
                 project.id.as_str(),
@@ -1029,6 +1095,7 @@ impl<'a> Board<'a> {
         dated.sort_by_key(|(date, _)| *date);
         let undated = everything.len() - dated.len();
         Home {
+            day: None,
             start_count: self.count(&query::preset("action", self.config)),
             stats: self.stats(),
             cards: self.cards(&everything),
@@ -1047,28 +1114,105 @@ impl<'a> Board<'a> {
     }
 }
 
+/// Whether the items of project `id` are shown on `day`: "Autres" always is.
+fn on_day(config: &Config, day: Option<Day>, id: &str) -> bool {
+    let Some(day) = day else {
+        return true;
+    };
+    config
+        .projects
+        .iter()
+        .find(|project| project.id == id)
+        .is_none_or(|project| project.on(day))
+}
+
+/// The next day a project is worked on after `day`, if it has days.
+fn next_day(project: &Project, day: Day) -> Option<Day> {
+    (1..=7)
+        .map(|step| Day::ALL[(day as usize + step) % 7])
+        .find(|next| project.days.contains(next))
+}
+
+/// The top of the home page on `day`, with every project that waits for another day: `all` sees
+/// every project, whatever the day.
+fn day_home(board: &Board, all: &Board, day: Day) -> DayHome {
+    let shown = board.shown();
+    let (named, daily): (Vec<&Project>, Vec<&Project>) =
+        shown.iter().partition(|project| !project.days.is_empty());
+    let listed = |projects: &[&Project]| {
+        projects
+            .iter()
+            .map(|project| project.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let subtitle = match (named.is_empty(), daily.is_empty()) {
+        (_, true) => listed(&named),
+        (true, false) => format!("{} : tous les jours", listed(&daily)),
+        (false, false) => format!("{} · et {} tous les jours", listed(&named), listed(&daily)),
+    };
+    let everything = all.run(&query::everything());
+    let resting = all
+        .shown()
+        .into_iter()
+        .filter(|project| !project.on(day))
+        .map(|project| {
+            let urgent = everything
+                .iter()
+                .filter(|item| item.project == project.id)
+                .map(|item| all.card_line(item))
+                .find(|line| line.tone.as_deref() == Some("red"))
+                .map(|line| line.tag);
+            Resting {
+                entry: format!("project:{}", project.id),
+                name: project.name.clone(),
+                color: project.color.clone(),
+                action_count: all.action_count(Some(&project.id)),
+                urgent,
+                next: next_day(project, day).map(|next| next.short().to_owned()),
+            }
+        })
+        .collect();
+    let mut title = day.name().to_owned();
+    if let Some(first) = title.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    DayHome {
+        title,
+        subtitle,
+        resting,
+    }
+}
+
 /// Builds what a UI draws: the sidebar, the list of `spec` and the home page. Muted projects are
-/// left out everywhere.
+/// left out everywhere; with `defaults.by_day`, so are the projects not worked on `day`.
 #[must_use]
 pub fn build(
     items: &[Item],
     config: &Config,
     spec: &ViewSpec,
+    day: Option<Day>,
     now: DateTime<FixedOffset>,
     issues: Vec<Issue>,
     refreshed_at: Option<DateTime<Utc>>,
 ) -> Snapshot {
-    let board = Board::new(items, config, now);
+    let board = Board::new(items, config, now, day);
+    let mut home = board.home();
+    if let Some(day) = board.day {
+        let all = Board::new(items, config, now, None);
+        home.day = Some(day_home(&board, &all, day));
+    }
     Snapshot {
         needs_setup: config.projects.is_empty(),
         github_connected: false,
         todoist_connected: false,
         sidebar: board.sidebar(),
         page: board.page(spec),
-        home: board.home(),
+        home,
         badge: badge(items, config, now),
         issues,
         refreshed_at,
+        day_bar: config.defaults.by_day.then_some(DayBar { day: board.day }),
     }
 }
 
@@ -1163,7 +1307,7 @@ mod tests {
     }
 
     fn snapshot_of(items: &[Item], spec: &ViewSpec) -> Snapshot {
-        build(items, &config(), spec, now(), Vec::new(), None)
+        build(items, &config(), spec, None, now(), Vec::new(), None)
     }
 
     fn snapshot(items: &[Item]) -> Snapshot {
@@ -1627,6 +1771,79 @@ mod tests {
     }
 
     #[test]
+    fn a_day_shows_its_projects_and_the_others_wait_on_the_home_page() {
+        use crate::config::Day;
+        let mut config = config();
+        config.defaults.by_day = true;
+        config.projects[0].days = vec![Day::Mon, Day::Thu];
+        config.projects[3].days = vec![Day::Tue];
+        let mut late = item("td:late", "a");
+        late.due = Some(Due::Date(date("2026-11-06")));
+        let items = [late, item("td:b", "b"), item("td:other", OTHERS)];
+        let on = |day| build(&items, &config, &everything(), day, now(), Vec::new(), None);
+
+        let tuesday = on(Some(Day::Tue));
+        assert_eq!(
+            tuesday.day_bar,
+            Some(DayBar {
+                day: Some(Day::Tue)
+            })
+        );
+        assert_eq!(tuesday.sidebar.projects_title, "Projets du mardi");
+        let entries: Vec<&str> = tuesday
+            .sidebar
+            .projects
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(
+            entries,
+            ["projects", "project:b", "project:empty", "project:others"]
+        );
+        let listed: Vec<&str> = tuesday
+            .page
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .map(|item| item.id.as_str())
+            .collect();
+        assert_eq!(listed, ["td:b", "td:other"]);
+        let day = tuesday.home.day.unwrap();
+        assert_eq!(day.title, "Mardi");
+        assert_eq!(day.subtitle, "Empty · et B tous les jours");
+        let resting: Vec<(&str, Option<&str>, Option<&str>)> = day
+            .resting
+            .iter()
+            .map(|project| {
+                (
+                    project.name.as_str(),
+                    project.urgent.as_deref(),
+                    project.next.as_deref(),
+                )
+            })
+            .collect();
+        // The late task of A presses even on a day without A.
+        assert_eq!(resting, [("A", Some("en retard de 2 j"), Some("jeu."))]);
+
+        // Every day, or the setting off: every project.
+        assert_eq!(on(None).sidebar.projects.len(), 5);
+        assert!(on(None).home.day.is_none());
+        config.defaults.by_day = false;
+        let off = build(
+            &items,
+            &config,
+            &everything(),
+            Some(Day::Tue),
+            now(),
+            Vec::new(),
+            None,
+        );
+        assert_eq!(off.day_bar, None);
+        assert_eq!(off.sidebar.projects_title, "Projets");
+        assert_eq!(off.sidebar.projects.len(), 5);
+    }
+
+    #[test]
     fn the_sidebar_counts_what_each_view_keeps() {
         let mut config = config();
         config.views.push(crate::config::SavedView {
@@ -1640,6 +1857,7 @@ mod tests {
             &pull_requests(),
             &config,
             &everything(),
+            None,
             now(),
             Vec::new(),
             None,

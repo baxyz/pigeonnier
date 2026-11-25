@@ -39,3 +39,12 @@ button.home-card { padding: 14px 16px; font-weight: normal; }
 button.deadline { padding: 6px 4px; font-weight: normal; }
 .blockers { padding: 10px 14px; background: alpha(@error_bg_color, 0.10); }
 .blockers .heading, .blockers image { color: @error_color; }
+.day-bar { margin: 8px 8px 2px; }
+.day-bar button { padding-left: 0; padding-right: 0; min-width: 0; }
+.day-bar button.today { color: @accent_color; font-weight: 700; }
+button.resting { padding: 8px 12px; }
+.drag-handle { opacity: 0.55; }
+.drop-here { box-shadow: inset 0 2px @accent_bg_color; }
+.day-toggle { min-width: 30px; min-height: 30px; padding: 0; font-weight: 600; }
+.week .accent { color: @accent_color; font-weight: 700; }
+.day-toggle:checked { background-color: @accent_bg_color; color: @accent_fg_color; }

@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, FixedOffset, Local};
 use pigeonnier_core::cache::Cache;
-use pigeonnier_core::config::Config;
+use pigeonnier_core::config::{Config, Day};
 use pigeonnier_core::credentials;
 use pigeonnier_core::discover::Suggestion;
 use pigeonnier_core::engine::{Choices, Engine, connect, github_client, todoist_session_client};
@@ -157,10 +157,15 @@ pub fn refresh() {
     }
 }
 
-pub async fn load(spec: &ViewSpec) -> Result<Snapshot, String> {
+pub async fn load(spec: &ViewSpec, day: Option<Day>) -> Result<Snapshot, String> {
     let service = service()?;
     let engine = service.engine.read().await;
-    engine.snapshot(spec, now()).map_err(readable)
+    engine.snapshot(spec, day, now()).map_err(readable)
+}
+
+/// The day of the week it is here.
+pub fn today() -> Day {
+    Day::of(now().date_naive())
 }
 
 /// Reads a typed query with the projects of the configuration in use.

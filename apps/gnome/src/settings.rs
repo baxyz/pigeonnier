@@ -4,7 +4,7 @@
 //! editing rules are plain functions; the drawing is in [`App::draw_settings`].
 
 use pigeonnier_core::config::{
-    Config, GithubLink, IssueScope, Project, TodoistLink, TodoistOthers, normalize_name,
+    Config, Day, GithubLink, IssueScope, Project, TodoistLink, TodoistOthers, normalize_name,
 };
 use pigeonnier_core::discover;
 use pigeonnier_core::engine::Choices;
@@ -196,6 +196,7 @@ pub fn new_project(index: usize) -> Project {
         roadmap: None,
         pinned: false,
         muted: false,
+        days: Vec::new(),
     }
 }
 
@@ -269,6 +270,9 @@ pub fn summary(config: &Config, project: &Project) -> String {
             None => format!("Todoist {}", link.section),
         });
     }
+    if config.defaults.by_day && !project.days.is_empty() {
+        parts.push(crate::week::days_text(project));
+    }
     if parts.is_empty() {
         "Rien de choisi".to_owned()
     } else {
@@ -289,6 +293,10 @@ pub enum Edit {
     Section(Option<(String, String)>),
     /// One place up (`-1`) or down (`1`) in the list, which is the order everywhere.
     Move(isize),
+    /// To that place in the list, dragged there.
+    MoveTo(usize),
+    /// Worked on that day, or not.
+    Day(Day, bool),
     Remove,
 }
 
@@ -350,8 +358,34 @@ pub fn apply(config: &mut Config, index: usize, edit: Edit) -> bool {
                 _ => false,
             }
         }
+        Edit::MoveTo(target) => {
+            if target == index || target >= config.projects.len() {
+                return false;
+            }
+            let project = config.projects.remove(index);
+            config.projects.insert(target, project);
+            true
+        }
+        Edit::Day(day, on) => {
+            project.days.retain(|known| *known != day);
+            if on {
+                project.days.push(day);
+                project.days.sort();
+            }
+            true
+        }
         Edit::Remove => true,
     }
+}
+
+/// Where the project at `place` ends up once the one at `from` was moved to `to`.
+#[must_use]
+pub fn moved_to(place: usize, from: usize, to: usize) -> usize {
+    if place == from {
+        return to;
+    }
+    let without = if place > from { place - 1 } else { place };
+    if without >= to { without + 1 } else { without }
 }
 
 /// Puts the projects in the order of their names, accents and case aside.
@@ -371,6 +405,7 @@ pub enum DefaultsEdit {
     Refresh(&'static str),
     ClaudeLabel(String),
     TodoistOthers(TodoistOthers),
+    ByDay(bool),
 }
 
 /// How often to refresh: `(value in the configuration, label)`.
@@ -392,6 +427,7 @@ pub fn apply_defaults(config: &mut Config, edit: DefaultsEdit) {
         DefaultsEdit::Refresh(every) => every.clone_into(&mut defaults.refresh),
         DefaultsEdit::ClaudeLabel(label) => label.trim().clone_into(&mut defaults.claude_label),
         DefaultsEdit::TodoistOthers(others) => defaults.todoist_others = others,
+        DefaultsEdit::ByDay(on) => defaults.by_day = on,
     }
 }
 
@@ -431,11 +467,12 @@ pub fn welcome(sender: &relm4::ComponentSender<App>, snapshot: &Snapshot) -> gtk
 pub const PAGE_PROJECTS: &str = "projects";
 pub const PAGE_ACCOUNTS: &str = "accounts";
 pub const PAGE_APP: &str = "app";
+pub const PAGE_WEEK: &str = "week";
 
 /// The preferences dialog and what was put in its pages, to take out when it is drawn again.
 pub struct Preferences {
     pub dialog: adw::PreferencesDialog,
-    pages: [adw::PreferencesPage; 3],
+    pages: [adw::PreferencesPage; 4],
     groups: Vec<(usize, adw::PreferencesGroup)>,
 }
 
@@ -455,6 +492,7 @@ impl Preferences {
         };
         let pages = [
             page(PAGE_PROJECTS, "Projets", "view-grid-symbolic"),
+            page(PAGE_WEEK, "Semaine", "x-office-calendar-symbolic"),
             page(PAGE_ACCOUNTS, "Comptes", "system-users-symbolic"),
             page(PAGE_APP, "Application", "preferences-system-symbolic"),
         ];
@@ -526,9 +564,12 @@ impl App {
         for group in self.projects_page() {
             preferences.add(0, group);
         }
-        preferences.add(1, self.accounts_group());
+        for group in self.week_page() {
+            preferences.add(1, group);
+        }
+        preferences.add(2, self.accounts_group());
         for group in self.app_page() {
-            preferences.add(2, group);
+            preferences.add(3, group);
         }
         self.preferences = Some(preferences);
     }
@@ -606,7 +647,7 @@ impl App {
         let group = adw::PreferencesGroup::new();
         group.set_title("Projets");
         group.set_description(Some(
-            "Un projet rassemble un compte, une org ou un dépôt GitHub avec ses issues, éventuellement son GitHub Project, et une section Todoist.",
+            "Un projet rassemble un compte, une org ou un dépôt GitHub avec ses issues, éventuellement son GitHub Project, et une section Todoist. Glisse-les par leur poignée pour les ranger.",
         ));
         let connected = self
             .snapshot
@@ -650,13 +691,16 @@ impl App {
         for (index, project) in config.projects.iter().enumerate() {
             group.add(&self.project_editor(config, choices, index, project));
         }
+        // The handles order the projects; sorting them all by name is a small button aside.
         if config.projects.len() > 1 {
-            let sort = adw::ButtonRow::new();
-            sort.set_title("Trier par nom");
-            sort.set_start_icon_name(Some("view-sort-ascending-symbolic"));
+            let sort = gtk::Button::from_icon_name("view-sort-ascending-symbolic");
+            sort.add_css_class("flat");
+            sort.set_valign(gtk::Align::Center);
+            sort.set_tooltip_text(Some("Trier par nom"));
+            sort.update_property(&[gtk::accessible::Property::Label("Trier par nom")]);
             let sender = self.sender.clone();
-            sort.connect_activated(move |_| sender.input(Msg::SortProjects));
-            group.add(&sort);
+            sort.connect_clicked(move |_| sender.input(Msg::SortProjects));
+            group.set_header_suffix(Some(&sort));
         }
         let add = adw::ButtonRow::new();
         add.set_title("Ajouter un projet");
@@ -961,6 +1005,44 @@ impl App {
         ));
     }
 
+    /// A handle to drag the project to another place in the list; the whole row takes a drop.
+    fn drag_handle(&self, expander: &adw::ExpanderRow, index: usize) -> gtk::Image {
+        let handle = gtk::Image::from_icon_name("list-drag-handle-symbolic");
+        handle.add_css_class("drag-handle");
+        handle.set_tooltip_text(Some("Glisser pour déplacer"));
+        let source = gtk::DragSource::new();
+        source.set_actions(gtk::gdk::DragAction::MOVE);
+        let place = u32::try_from(index).unwrap_or(u32::MAX);
+        source.set_content(Some(&gtk::gdk::ContentProvider::for_value(
+            &place.to_value(),
+        )));
+        let row = expander.clone();
+        source.connect_drag_begin(move |source, _| {
+            source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&row))), 0, 0);
+        });
+        handle.add_controller(source);
+
+        let target = gtk::DropTarget::new(u32::static_type(), gtk::gdk::DragAction::MOVE);
+        let row = expander.clone();
+        target.connect_enter(move |_, _, _| {
+            row.add_css_class("drop-here");
+            gtk::gdk::DragAction::MOVE
+        });
+        let row = expander.clone();
+        target.connect_leave(move |_| row.remove_css_class("drop-here"));
+        let sender = self.sender.clone();
+        target.connect_drop(move |_, value, _, _| {
+            let Ok(from) = value.get::<u32>() else {
+                return false;
+            };
+            let from = usize::try_from(from).unwrap_or(usize::MAX);
+            sender.input(Msg::EditProject(from, Edit::MoveTo(index)));
+            true
+        });
+        expander.add_controller(target);
+        handle
+    }
+
     /// The Todoist section of a project: one to choose, or a new one to create.
     fn todoist_rows(
         &self,
@@ -1035,6 +1117,7 @@ impl App {
         let expander = adw::ExpanderRow::new();
         expander.set_title(&escape(&project.name));
         expander.set_subtitle(&escape(&summary(config, project)));
+        expander.add_prefix(&self.drag_handle(&expander, index));
         expander.add_prefix(&crate::dot(&project.color));
         expander.set_expanded(self.expanded == Some(index));
         let sender = self.sender.clone();
@@ -1089,6 +1172,9 @@ impl App {
         }
 
         self.todoist_rows(&expander, config, choices, index, project);
+        if config.defaults.by_day {
+            expander.add_row(&self.days_row(index, project));
+        }
 
         // Up and down: the order of this list is the order of the sidebar and the home page.
         let count = config.projects.len();
@@ -1213,6 +1299,37 @@ mod tests {
         assert!(!apply(&mut config, 2, Edit::Move(1)));
         sort_projects(&mut config);
         assert_eq!(names(&config), ["Brig-id", "écrits", "Zen"]);
+    }
+
+    #[test]
+    fn a_dragged_project_lands_where_it_was_dropped() {
+        let mut config = Config::default();
+        for (index, name) in ["A", "B", "C", "D"].into_iter().enumerate() {
+            let mut project = new_project(index);
+            name.clone_into(&mut project.name);
+            config.projects.push(project);
+        }
+        let names = |config: &Config| -> String {
+            config
+                .projects
+                .iter()
+                .map(|project| project.name.as_str())
+                .collect()
+        };
+        assert!(apply(&mut config, 3, Edit::MoveTo(0)));
+        assert_eq!(names(&config), "DABC");
+        assert!(apply(&mut config, 0, Edit::MoveTo(2)));
+        assert_eq!(names(&config), "ABDC");
+        assert!(!apply(&mut config, 1, Edit::MoveTo(1)));
+        // The open project follows: B (1) moved to 3, so C (3) is now at 2.
+        assert_eq!(moved_to(3, 1, 3), 2);
+        assert_eq!(moved_to(1, 1, 3), 3);
+        assert_eq!(moved_to(0, 3, 0), 1);
+        assert!(apply(&mut config, 0, Edit::Day(Day::Thu, true)));
+        assert!(apply(&mut config, 0, Edit::Day(Day::Mon, true)));
+        assert_eq!(config.projects[0].days, [Day::Mon, Day::Thu]);
+        assert!(apply(&mut config, 0, Edit::Day(Day::Mon, false)));
+        assert_eq!(config.projects[0].days, [Day::Thu]);
     }
 
     #[test]
