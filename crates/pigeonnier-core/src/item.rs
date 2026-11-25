@@ -61,6 +61,37 @@ pub enum State {
     Planned,
 }
 
+/// What keeps a pull request from being merged, whoever has to act on it: a review asked of me says
+/// nothing of the checks, so this is kept beside the state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Blocker {
+    Conflicts,
+    /// The names of the checks that failed; empty when GitHub only gave the overall result.
+    Checks(Vec<String>),
+}
+
+impl Blocker {
+    /// A word or two, for a badge.
+    #[must_use]
+    pub fn short(&self) -> &'static str {
+        match self {
+            Self::Conflicts => "conflits",
+            Self::Checks(_) => "CI rouge",
+        }
+    }
+
+    /// A sentence, for the detail pane.
+    #[must_use]
+    pub fn sentence(&self) -> String {
+        match self {
+            Self::Conflicts => "Conflits avec la branche de base".to_owned(),
+            Self::Checks(names) if names.is_empty() => "Des checks échouent".to_owned(),
+            Self::Checks(names) => format!("Checks en échec : {}", names.join(", ")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Due {
     Date(NaiveDate),
@@ -135,6 +166,8 @@ pub struct Item {
     pub details: Option<Details>,
     /// A pull request not ready for review yet.
     pub draft: bool,
+    /// What keeps a pull request from being merged; always empty for anything else.
+    pub blockers: Vec<Blocker>,
     pub provenance: Provenance,
 }
 
@@ -242,6 +275,10 @@ impl Item {
         if self.updated_at != DateTime::<Utc>::default() {
             let age = (now.with_timezone(&Utc) - self.updated_at).num_days();
             fields.insert("age_days".to_owned(), json!(age.max(0)));
+        }
+        // Only a pull request can be blocked: for the rest the field stays absent, not false.
+        if self.type_id() == "pr" {
+            fields.insert("blocked".to_owned(), json!(!self.blockers.is_empty()));
         }
         if let Some(due) = self.effective_due() {
             fields.insert("effective_due".to_owned(), json!(due.sort_text()));

@@ -130,6 +130,7 @@ impl Field {
                 choice("à-corriger", "à corriger", is("state", json!("changes"))),
                 choice("ci-rouge", "CI rouge", is("state", json!("ci"))),
                 choice("conflits", "conflits", is("state", json!("conflicts"))),
+                choice("bloquée", "bloquée", is("blocked", json!(true))),
                 choice("à-merger", "à merger", is("state", json!("merge"))),
                 choice("en-attente", "en attente", is("state", json!("waiting"))),
                 choice("brouillon", "brouillon", is("state", json!("draft"))),

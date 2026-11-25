@@ -27,7 +27,15 @@ const ISSUE_FIELDS: &str = "
 const PR_FIELDS: &str = "
     id number title url isDraft updatedAt createdAt reviewDecision mergeable headRefOid
     repository { name nameWithOwner viewerDefaultMergeMethod owner { login } }
-    statusCheckRollup { state }
+    statusCheckRollup {
+      state
+      contexts(first: 30) {
+        nodes {
+          ... on CheckRun { name conclusion }
+          ... on StatusContext { context state }
+        }
+      }
+    }
     labels(first: 20) { nodes { name } }
     milestone { dueOn }
     author { login __typename }

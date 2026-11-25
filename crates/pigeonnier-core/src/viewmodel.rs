@@ -10,7 +10,7 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::item::{Due, Duration, Item, Kind, OTHERS, Priority, Reason, State};
+use crate::item::{Blocker, Due, Duration, Item, Kind, OTHERS, Priority, Reason, State};
 use crate::map::Record;
 use crate::query::{self, Field, Filter, GroupBy, PRESETS, Query, ViewSpec};
 use crate::source::todoist::Comment;
@@ -204,6 +204,8 @@ pub struct ItemVm {
     pub state_label: Option<String>,
     /// `red` or `green` when the state calls for it.
     pub state_tone: Option<String>,
+    /// What keeps a pull request from being merged, when its state does not already say it.
+    pub blocked_label: Option<String>,
     /// Shown dimmed: a draft pull request, not ready for anyone yet.
     pub dimmed: bool,
     pub action_required: bool,
@@ -216,6 +218,8 @@ pub struct ItemVm {
 pub struct DetailsVm {
     /// Markdown, for the UI to render; `None` when the item has no description to read here.
     pub description: Option<String>,
+    /// What keeps a pull request from being merged, a sentence each.
+    pub blockers: Vec<String>,
     pub facts: Vec<Fact>,
     /// The item has comments that can be read here.
     pub commentable: bool,
@@ -480,6 +484,7 @@ fn details_vm(item: &Item, projects: &Projects, now: DateTime<FixedOffset>) -> D
     }
     DetailsVm {
         description: details.map(|details| details.description.clone()),
+        blockers: item.blockers.iter().map(Blocker::sentence).collect(),
         facts,
         commentable: item.is_todoist(),
         has_comments: details
@@ -522,6 +527,13 @@ fn item_vm(item: &Item, projects: &Projects, now: DateTime<FixedOffset>) -> Item
         State::ActionRequired(Reason::ToMerge) => Some("green"),
         _ => None,
     };
+    let state = state_label(item, now);
+    let blocked: Vec<&str> = item
+        .blockers
+        .iter()
+        .map(Blocker::short)
+        .filter(|short| state.as_deref() != Some(*short))
+        .collect();
     let (_, project_name, project_color) = projects.look(&item.project);
     ItemVm {
         id: item.id.clone(),
@@ -545,8 +557,9 @@ fn item_vm(item: &Item, projects: &Projects, now: DateTime<FixedOffset>) -> Item
         due_label: due_label(item, now),
         due_short: short_due(item, now),
         due_urgency: due_urgency(item, now),
-        state_label: state_label(item, now),
+        state_label: state,
         state_tone: state_tone.map(str::to_owned),
+        blocked_label: (!blocked.is_empty()).then(|| blocked.join(", ")),
         dimmed: item.draft,
         action_required: matches!(item.state, State::ActionRequired(_)),
         actions,
@@ -1110,6 +1123,7 @@ mod tests {
             snoozed_until: None,
             details: None,
             draft: false,
+            blockers: Vec::new(),
             provenance: Provenance {
                 source: "test",
                 id: id.to_owned(),
@@ -1566,6 +1580,50 @@ mod tests {
     fn the_text_narrows_the_list() {
         let page = snapshot_of(&pull_requests(), &typed("WAIT", &[])).page;
         assert_eq!(groups(&page), [(None, "", vec!["waiting"])]);
+    }
+
+    #[test]
+    fn a_blocked_pr_says_so_unless_its_state_already_does() {
+        use crate::item::Blocker;
+        let mut review = pr(
+            "review",
+            "a",
+            Kind::Review,
+            State::ActionRequired(Reason::ToReview),
+        );
+        review.blockers = vec![Blocker::Conflicts, Blocker::Checks(vec!["osv".to_owned()])];
+        let mut mine = pr(
+            "ci",
+            "a",
+            Kind::MyPr,
+            State::ActionRequired(Reason::CiFailed),
+        );
+        mine.blockers = vec![Blocker::Checks(Vec::new())];
+        let snapshot = snapshot_of(&[review, mine], &typed("état:bloquée", &[]));
+        let items: Vec<(&str, Option<&str>, Vec<&str>)> = snapshot
+            .page
+            .groups
+            .iter()
+            .flat_map(|group| &group.items)
+            .map(|item| {
+                (
+                    item.id.as_str(),
+                    item.blocked_label.as_deref(),
+                    item.details.blockers.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                (
+                    "review",
+                    Some("conflits, CI rouge"),
+                    vec!["Conflits avec la branche de base", "Checks en échec : osv"]
+                ),
+                ("ci", None, vec!["Des checks échouent"]),
+            ]
+        );
     }
 
     #[test]

@@ -587,6 +587,7 @@ mod tests {
             snoozed_until: None,
             details: None,
             draft: false,
+            blockers: Vec::new(),
             provenance: Provenance {
                 source: "test",
                 id: id.to_owned(),
