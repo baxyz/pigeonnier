@@ -76,6 +76,9 @@ pub struct Defaults {
     pub issues: IssueScope,
     /// The Todoist tasks that are in none of my projects' sections.
     pub todoist_others: TodoistOthers,
+    /// Projects have days, and the window shows the projects of one day.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub by_day: bool,
 }
 
 /// Which Todoist tasks outside my projects still come in, under "Autres".
@@ -113,6 +116,7 @@ impl Default for Defaults {
             direct_reviews_only: false,
             issues: IssueScope::default(),
             todoist_others: TodoistOthers::default(),
+            by_day: false,
         }
     }
 }
@@ -184,6 +188,75 @@ pub struct Project {
     pub pinned: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub muted: bool,
+    /// The days the project is worked on; none means every day. Only read when
+    /// `defaults.by_day` is on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub days: Vec<Day>,
+}
+
+impl Project {
+    /// Whether the project is worked on that day: a project with no day is there every day.
+    #[must_use]
+    pub fn on(&self, day: Day) -> bool {
+        self.days.is_empty() || self.days.contains(&day)
+    }
+}
+
+/// A day of the week, as `projects.toml` spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Day {
+    #[serde(rename = "lun")]
+    Mon,
+    #[serde(rename = "mar")]
+    Tue,
+    #[serde(rename = "mer")]
+    Wed,
+    #[serde(rename = "jeu")]
+    Thu,
+    #[serde(rename = "ven")]
+    Fri,
+    #[serde(rename = "sam")]
+    Sat,
+    #[serde(rename = "dim")]
+    Sun,
+}
+
+impl Day {
+    pub const ALL: [Self; 7] = [
+        Self::Mon,
+        Self::Tue,
+        Self::Wed,
+        Self::Thu,
+        Self::Fri,
+        Self::Sat,
+        Self::Sun,
+    ];
+
+    #[must_use]
+    pub fn of(date: chrono::NaiveDate) -> Self {
+        use chrono::Datelike;
+        Self::ALL[date.weekday().num_days_from_monday() as usize]
+    }
+
+    /// `lundi`
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        [
+            "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche",
+        ][self as usize]
+    }
+
+    /// `lun.`
+    #[must_use]
+    pub fn short(self) -> &'static str {
+        ["lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim."][self as usize]
+    }
+
+    /// `L`
+    #[must_use]
+    pub fn letter(self) -> &'static str {
+        ["L", "M", "M", "J", "V", "S", "D"][self as usize]
+    }
 }
 
 fn default_color() -> String {
@@ -426,6 +499,25 @@ done_values = ["Fini"]
 
     fn config() -> Config {
         Config::parse(SPEC_EXAMPLE, "test").unwrap()
+    }
+
+    #[test]
+    fn a_project_has_days_or_every_day() {
+        let config = Config::parse(
+            "[defaults]\nby_day = true\n[[project]]\nid = \"a\"\nname = \"A\"\ndays = [\"lun\", \"jeu\"]\n[[project]]\nid = \"b\"\nname = \"B\"\n",
+            "test",
+        )
+        .unwrap();
+        assert!(config.defaults.by_day);
+        let (a, b) = (&config.projects[0], &config.projects[1]);
+        assert_eq!(a.days, [Day::Mon, Day::Thu]);
+        assert!(a.on(Day::Thu) && !a.on(Day::Wed));
+        assert!(Day::ALL.into_iter().all(|day| b.on(day)));
+        let wednesday = chrono::NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
+        assert_eq!(Day::of(wednesday), Day::Wed);
+        let saved = toml::to_string(&config).unwrap();
+        assert!(saved.contains("days = [\"lun\", \"jeu\"]"), "{saved}");
+        assert!(saved.contains("by_day = true"));
     }
 
     #[test]

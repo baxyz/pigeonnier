@@ -12,12 +12,13 @@ mod markdown;
 mod service;
 mod settings;
 mod sidebar;
+mod week;
 mod widgets;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use pigeonnier_core::config::Config;
+use pigeonnier_core::config::{Config, Day};
 use pigeonnier_core::discover::Suggestion;
 use pigeonnier_core::engine::Choices;
 use pigeonnier_core::query::{Field, Filter, GroupBy, Query, SortBy, ViewSpec};
@@ -57,6 +58,10 @@ enum Msg {
     Reveal(String, String),
     /// Opens what waits for me on its first item, in focus mode.
     Start,
+    /// Shows the projects of a day, or of every day.
+    Day(Option<Day>),
+    /// Opens a project that waits for another day: every day is shown again.
+    OpenResting(String),
     Select(String),
     /// An item was clicked: in a narrow window, its detail takes the place of the list.
     Show(String),
@@ -191,6 +196,10 @@ struct App {
     selected: Option<String>,
     /// Where the selection was, to stay there when the selected item leaves the list.
     selected_index: usize,
+    /// The day shown when projects have days: today at launch, `None` for every day.
+    day: Option<Day>,
+    /// The choice of day, above the sidebar, when projects have days.
+    day_bar: gtk::Box,
     /// The comments read for the selected task, and where to show them.
     comments: Option<(String, Result<Vec<CommentVm>, String>)>,
     comment_box: Option<(String, gtk::Box)>,
@@ -243,7 +252,7 @@ impl App {
     }
 
     fn load(&self) {
-        spawn_load(&self.sender, self.spec.clone());
+        spawn_load(&self.sender, self.spec.clone(), self.day);
     }
 
     /// Uses a changed view: the filter bar shows it at once, the list follows.
@@ -572,10 +581,10 @@ fn apply_config(sender: &ComponentSender<App>, config: Config, choices: Choices)
     });
 }
 
-fn spawn_load(sender: &ComponentSender<App>, spec: ViewSpec) {
+fn spawn_load(sender: &ComponentSender<App>, spec: ViewSpec, day: Option<Day>) {
     let sender = sender.clone();
     relm4::spawn(async move {
-        sender.input(Msg::Loaded(service::load(&spec).await));
+        sender.input(Msg::Loaded(service::load(&spec, day).await));
     });
 }
 
@@ -668,6 +677,12 @@ impl SimpleComponent for App {
             });
         }
         let sidebar_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let day_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        day_bar.add_css_class("linked");
+        day_bar.add_css_class("day-bar");
+        day_bar.set_homogeneous(true);
+        day_bar.set_visible(false);
+        sidebar_box.append(&day_bar);
         sidebar_box.append(&sidebar);
         sidebar_box.append(&scrolled(&sidebar_projects));
         let sidebar_header = adw::HeaderBar::new();
@@ -890,6 +905,8 @@ impl SimpleComponent for App {
             drawn_filters: None,
             selected: None,
             selected_index: 0,
+            day: Some(service::today()),
+            day_bar,
             comments: None,
             comment_box: None,
             preferences: None,
@@ -963,6 +980,29 @@ impl SimpleComponent for App {
                     self.selected = Some(item);
                     self.inner.set_show_content(true);
                 }
+            }
+            Msg::Day(day) => {
+                if self.day != day {
+                    self.day = day;
+                    self.load();
+                }
+            }
+            Msg::OpenResting(entry) => {
+                let Some(project) = entry.strip_prefix("project:") else {
+                    return;
+                };
+                self.day = None;
+                let entry = Entry {
+                    id: entry.clone(),
+                    title: String::new(),
+                    icon: None,
+                    colors: Vec::new(),
+                    count: 0,
+                    saved: false,
+                    spec: pigeonnier_core::query::project(project),
+                };
+                self.focus = false;
+                self.open_entry(&entry);
             }
             Msg::Start => {
                 if let Some(entry) = self.find_entry(START) {
@@ -1310,14 +1350,17 @@ impl SimpleComponent for App {
                 };
                 let previous = config.clone();
                 let removed = matches!(edit, Edit::Remove);
-                // The project that moves stays open.
                 let moved = match edit {
                     Edit::Move(step) => index.checked_add_signed(step),
+                    Edit::MoveTo(target) => Some(target),
                     _ => None,
                 };
                 let redraw = settings::apply(config, index, edit);
+                // The project that was open stays open, wherever it went.
                 if redraw && let Some(target) = moved {
-                    self.expanded = Some(target);
+                    self.expanded = self
+                        .expanded
+                        .map(|open| settings::moved_to(open, index, target));
                 }
                 if removed {
                     self.expanded = None;
@@ -1330,7 +1373,7 @@ impl SimpleComponent for App {
                     return;
                 };
                 // The projects say which choice of issues they follow by default.
-                let redraw = matches!(edit, DefaultsEdit::Issues(_));
+                let redraw = matches!(edit, DefaultsEdit::Issues(_) | DefaultsEdit::ByDay(_));
                 settings::apply_defaults(config, edit);
                 self.commit(&sender, redraw);
             }

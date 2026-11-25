@@ -191,7 +191,7 @@ async fn sources_end_up_in_one_list_per_project() {
 
     assert_eq!(engine.refresh().await.unwrap(), []);
 
-    let snapshot = engine.snapshot(&everything(), now()).unwrap();
+    let snapshot = engine.snapshot(&everything(), None, now()).unwrap();
     assert_eq!(snapshot.page.groups.len(), 1);
     let project = &snapshot.page.groups[0];
     assert_eq!(project.title, "Acme");
@@ -230,7 +230,7 @@ async fn a_source_that_fails_keeps_its_last_answer_and_is_reported() {
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].source, "Todoist");
     assert!(issues[0].reconnect);
-    let snapshot = engine.snapshot(&everything(), now()).unwrap();
+    let snapshot = engine.snapshot(&everything(), None, now()).unwrap();
     assert_eq!(snapshot.page.total, 4);
     assert_eq!(snapshot.issues, issues);
 }
@@ -313,9 +313,11 @@ async fn a_pr_snoozes_locally() {
             .iter()
             .any(|item| item.id == "gh-pr:acme/tool#3")
     };
-    assert!(!listed(engine.snapshot(&everything(), now()).unwrap()));
+    assert!(!listed(
+        engine.snapshot(&everything(), None, now()).unwrap()
+    ));
     let later = DateTime::parse_from_rfc3339("2026-11-10T09:00:00+01:00").unwrap();
-    assert!(listed(engine.snapshot(&everything(), later).unwrap()));
+    assert!(listed(engine.snapshot(&everything(), None, later).unwrap()));
 }
 
 #[tokio::test]

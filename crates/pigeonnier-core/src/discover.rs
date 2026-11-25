@@ -57,6 +57,7 @@ pub fn propose(owners: &[Owner], sections: &[String], parent: Option<&str>) -> C
             roadmap: None,
             pinned: false,
             muted: false,
+            days: Vec::new(),
         });
     }
     for section in unpaired {
@@ -72,6 +73,7 @@ pub fn propose(owners: &[Owner], sections: &[String], parent: Option<&str>) -> C
             roadmap: None,
             pinned: false,
             muted: false,
+            days: Vec::new(),
         });
     }
     Config {
@@ -205,6 +207,7 @@ impl Context<'_> {
             roadmap: None,
             pinned: false,
             muted: false,
+            days: Vec::new(),
         }
     }
 }

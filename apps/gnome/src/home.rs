@@ -3,7 +3,7 @@
 //! The home page: four figures, a card per project with what presses, and the few items that have
 //! a date. Everything on it opens a list.
 
-use pigeonnier_core::viewmodel::{Card, Deadline, Home, Stat};
+use pigeonnier_core::viewmodel::{Card, DayHome, Deadline, Home, Resting, Stat};
 use relm4::adw::prelude::*;
 use relm4::{adw, gtk};
 
@@ -79,6 +79,71 @@ impl App {
         let (sender, entry) = (self.sender.clone(), card.entry.clone());
         button.connect_clicked(move |_| sender.input(Msg::SelectEntry(entry.clone())));
         button
+    }
+
+    /// A project that waits for another day, in one line: it opens with every day shown.
+    fn resting(&self, project: &Resting) -> gtk::Button {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.append(&dot(&project.color));
+        let name = line_label(&project.name);
+        name.set_hexpand(true);
+        row.append(&name);
+        if let Some(urgent) = &project.urgent {
+            row.append(&badge(urgent, Some("red")));
+        } else if project.action_count > 0 {
+            let count = dim_label(&project.action_count.to_string());
+            count.add_css_class("numeric");
+            row.append(&count);
+        }
+        if let Some(next) = &project.next {
+            let next = gtk::Label::new(Some(next));
+            next.add_css_class("dim-label");
+            next.add_css_class("caption");
+            row.append(&next);
+        }
+        let button = card_button(&row);
+        button.add_css_class("resting");
+        let (sender, entry) = (self.sender.clone(), project.entry.clone());
+        button.connect_clicked(move |_| sender.input(Msg::OpenResting(entry.clone())));
+        button
+    }
+
+    /// The day on top of the home page.
+    fn day_head(day: &DayHome) -> gtk::Box {
+        let head = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        let title = gtk::Label::new(Some(&day.title));
+        title.set_xalign(0.0);
+        title.add_css_class("title-2");
+        head.append(&title);
+        let subtitle = dim_label(&day.subtitle);
+        // A wrapping text asks for its whole line unless told how wide it may be.
+        subtitle.set_max_width_chars(90);
+        head.append(&subtitle);
+        head
+    }
+
+    /// The projects that wait for another day, under the cards.
+    fn resting_section(&self, day: &DayHome) -> Option<gtk::Box> {
+        if day.resting.is_empty() {
+            return None;
+        }
+        let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let title = gtk::Label::new(Some("Pas aujourd'hui"));
+        title.set_xalign(0.0);
+        title.add_css_class("heading");
+        section.append(&title);
+        // As many in a row as there is room for, so that a narrow window does not grow.
+        let flow = gtk::FlowBox::new();
+        flow.set_selection_mode(gtk::SelectionMode::None);
+        flow.set_homogeneous(true);
+        flow.set_max_children_per_line(3);
+        flow.set_column_spacing(8);
+        flow.set_row_spacing(8);
+        for project in &day.resting {
+            flow.append(&self.resting(project));
+        }
+        section.append(&flow);
+        Some(section)
     }
 
     fn deadline(&self, deadline: &Deadline) -> gtk::Button {
@@ -180,6 +245,9 @@ impl App {
             grid.set_valign(gtk::Align::Start);
             grid
         };
+        if let Some(day) = &home.day {
+            self.home.append(&Self::day_head(day));
+        }
         let narrow = self.layout == Layout::Narrow;
         let stats = grid(12);
         let columns = if narrow { 2 } else { 4 };
@@ -208,15 +276,21 @@ impl App {
         } else {
             gtk::Box::new(gtk::Orientation::Vertical, 18)
         };
+        let main = gtk::Box::new(gtk::Orientation::Vertical, 18);
+        main.set_hexpand(true);
         if home.cards.is_empty() {
             let empty = adw::StatusPage::new();
             empty.set_icon_name(Some("emblem-ok-symbolic"));
             empty.set_title("Rien à faire");
             empty.set_hexpand(true);
-            body.append(&empty);
+            main.append(&empty);
         } else {
-            body.append(&cards);
+            main.append(&cards);
         }
+        if let Some(resting) = home.day.as_ref().and_then(|day| self.resting_section(day)) {
+            main.append(&resting);
+        }
+        body.append(&main);
         body.append(&deadlines);
         self.home.append(&body);
     }

@@ -4,12 +4,13 @@
 //! project; choosing one fills the filter bar above the list. The projects scroll on their own,
 //! under the rest that stays in place.
 
+use pigeonnier_core::config::Day;
 use pigeonnier_core::viewmodel::Entry;
 use relm4::adw::prelude::*;
 use relm4::gtk;
 
 use crate::widgets::{all_mark, dot};
-use crate::{App, HOME};
+use crate::{App, HOME, Msg, service};
 
 impl App {
     fn sidebar_row(
@@ -82,13 +83,14 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
+        self.draw_day_bar(snapshot.day_bar.is_some());
         let home = gtk::Image::from_icon_name("go-home-symbolic");
         self.sidebar_row(&self.sidebar, HOME, "Accueil", home.upcast_ref(), 0);
         self.sidebar_section("Vues");
         for entry in &snapshot.sidebar.views {
             self.sidebar_entry(&self.sidebar, entry);
         }
-        self.sidebar_section("Projets");
+        self.sidebar_section(&snapshot.sidebar.projects_title);
         // "Tous" stays with the views; the projects themselves scroll.
         let (all, projects) = snapshot
             .sidebar
@@ -99,6 +101,48 @@ impl App {
         }
         for entry in projects {
             self.sidebar_entry(&self.sidebar_projects, entry);
+        }
+    }
+
+    /// The seven days and every day, when projects have days. Today stands out.
+    fn draw_day_bar(&self, by_day: bool) {
+        while let Some(child) = self.day_bar.first_child() {
+            self.day_bar.remove(&child);
+        }
+        self.day_bar.set_visible(by_day);
+        if !by_day {
+            return;
+        }
+        let today = service::today();
+        let mut first: Option<gtk::ToggleButton> = None;
+        let choices = Day::ALL.into_iter().map(Some).chain([None]);
+        for day in choices {
+            // Every day is a calendar: a word would not fit beside the seven letters.
+            let button = if let Some(day) = day {
+                gtk::ToggleButton::with_label(day.letter())
+            } else {
+                let all = gtk::ToggleButton::new();
+                all.set_icon_name("x-office-calendar-symbolic");
+                all
+            };
+            let name = day.map_or("Tous les jours", Day::name);
+            button.set_tooltip_text(Some(name));
+            button.update_property(&[gtk::accessible::Property::Label(name)]);
+            if day == Some(today) {
+                button.add_css_class("today");
+            }
+            match &first {
+                Some(first) => button.set_group(Some(first)),
+                None => first = Some(button.clone()),
+            }
+            button.set_active(self.day == day);
+            let sender = self.sender.clone();
+            button.connect_toggled(move |button| {
+                if button.is_active() {
+                    sender.input(Msg::Day(day));
+                }
+            });
+            self.day_bar.append(&button);
         }
     }
 }
