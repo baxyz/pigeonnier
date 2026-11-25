@@ -21,7 +21,10 @@ It gathers, for each project:
 A **project** is a GitHub account or organization, or one of its repositories, optionally one of
 its GitHub Projects, and optionally one Todoist section. A project made of one repository takes
 that repository's pull requests and issues away from the project of its owner. An issue assigned
-to me that no project lists goes to "Autres". The app proposes projects on the first run and lets every one of
+to me that no project lists goes to "Autres"; a Todoist task outside the projects' sections only
+does when the settings ask for it (all of them, or those of one Todoist project), since a whole
+Todoist account buries what matters. The order of the projects in the settings is their order
+everywhere. The app proposes projects on the first run and lets every one of
 them be fixed by hand.
 
 ## Principles
@@ -93,14 +96,18 @@ request or issue decides its project.
 5. `APPROVED`, or no review required, with green or no CI and `MERGEABLE` → *à merger*
 6. Otherwise, or draft, or `mergeable` still `UNKNOWN` → *en attente*, greyed out
 
-Pull requests from bots are listed like the others, at the lowest priority; the views of what
-waits for me leave them out with the filter `-auteur:robot`.
+Pull requests from bots are listed and counted like the others, at the lowest priority: a review
+asked of me is mine to do, whoever opened the pull request. Only notifications leave them out, and
+`-auteur:robot` hides them from a list.
+
+Whatever my part in a pull request, the list and the detail also say what keeps it from being
+merged: conflicts with its base branch, or failed checks, named. `état:bloquée` lists them.
 
 ### The window
 
 - **Three panes.** The sidebar holds the home page and saved filters; the list shows one of them
   under its filter bar; the detail shows the selected item and its actions. A narrower window
-  folds the sidebar away, then shows one pane at a time.
+  folds the sidebar away, then shows one pane at a time. In the sidebar, only the projects scroll.
 - **The sidebar only holds saved filters**, and the filter bar always shows the one in use. A view
   filters by state or date, a project by project; the grouping is a setting apart.
 - **A filter** is a field, values and "is" or "is not". The fields: project, type, source, state,
