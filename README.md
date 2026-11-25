@@ -39,8 +39,10 @@ The window opens on a welcome page; **Configurer Pigeonnier** opens the preferen
    opens the page to paste it on. **Connecter** Todoist opens the browser; authorize, and that is
    all.
 2. **Projets**: **Proposer mes projets** makes one project per GitHub account and organization,
-   paired with the Todoist section of the same name. Open a project to change its name (Enter to
-   apply), narrow it to one repository, choose its issues, its GitHub Project or its Todoist section.
+   paired with the Todoist section of the same name. Open a project to change its name, narrow it
+   to one repository, choose its issues, its GitHub Project or its Todoist section, or create a new
+   section; move it up or down, or sort them all by name. **Autres tâches Todoist** says which tasks
+   outside the projects still come in: none (the default), all, or those of one Todoist project.
    Suggestions offer the projects and links that are missing, from what the accounts see and what
    lands in "Autres"; each can be applied or ignored.
 3. **Application**: the issues listed by default, which pull requests to list, when a waiting
