@@ -603,3 +603,28 @@ async fn issues_go_to_the_most_precise_project_and_follow_its_choice() {
             .all(|item| item.project == "tool")
     );
 }
+
+#[tokio::test]
+async fn a_section_is_created_once_in_the_project_named() {
+    let todoist = todoist(&[]).await;
+    let engine = engine(None, Some(&todoist));
+    engine.refresh().await.unwrap();
+
+    engine.add_section("Dev", "Pigeonnier").await.unwrap();
+    // The section the project already has is not created again.
+    engine.add_section("Dev", "acme").await.unwrap();
+    assert!(matches!(
+        engine.add_section("Nope", "x").await,
+        Err(EngineError::UnknownParent(_))
+    ));
+
+    let requests = todoist.received_requests().await.unwrap();
+    let commands: Vec<String> = requests
+        .iter()
+        .map(|request| url_decode(&String::from_utf8_lossy(&request.body)))
+        .filter(|body| body.starts_with("commands="))
+        .collect();
+    assert_eq!(commands.len(), 1);
+    assert!(commands[0].contains("section_add"));
+    assert!(commands[0].contains(r#""name":"Pigeonnier","project_id":"p1""#));
+}
