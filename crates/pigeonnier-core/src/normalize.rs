@@ -514,6 +514,15 @@ pub fn todoist_item(raw: &RawItem, sync: &SyncState, context: &Context<'_>) -> O
                 .project_for_section(section, &todoist_project)
         })
         .map_or(OTHERS, |project| project.id.as_str());
+    if project == OTHERS
+        && !context
+            .config
+            .defaults
+            .todoist_others
+            .keeps(&todoist_project)
+    {
+        return None;
+    }
     let labels = names(&record, "labels", None);
     let details = todoist_details(&record, &todoist_project, section.as_deref(), &labels);
     let claude = labels
@@ -558,6 +567,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::config::TodoistOthers;
     use crate::source::github::{raw_project_item, raw_pull_request};
     use crate::source::todoist::SyncResponse;
 
@@ -851,7 +861,8 @@ mod tests {
 
     #[test]
     fn todoist_tasks_route_by_section_and_invert_priority() {
-        let config = config();
+        let mut config = config();
+        config.defaults.todoist_others = TodoistOthers::All;
         let context = Context {
             config: &config,
             me: "me",
@@ -880,8 +891,36 @@ mod tests {
     }
 
     #[test]
+    fn todoist_tasks_outside_my_projects_come_in_only_when_asked() {
+        let kept = |others: TodoistOthers| {
+            let mut config = config();
+            config.defaults.todoist_others = others;
+            let context = Context {
+                config: &config,
+                me: "me",
+                now: now(),
+            };
+            let state = sync_state();
+            state
+                .raw_items()
+                .iter()
+                .filter_map(|raw| todoist_item(raw, &state, &context))
+                .map(|item| item.project)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kept(TodoistOthers::default()), ["acme"]);
+        assert_eq!(kept(TodoistOthers::Project("Perso".to_owned())), ["acme"]);
+        assert_eq!(
+            kept(TodoistOthers::Project("Dev".to_owned())),
+            ["acme", OTHERS]
+        );
+        assert_eq!(kept(TodoistOthers::All), ["acme", OTHERS]);
+    }
+
+    #[test]
     fn a_todoist_task_carries_what_unfolding_it_shows() {
-        let config = config();
+        let mut config = config();
+        config.defaults.todoist_others = TodoistOthers::All;
         let context = Context {
             config: &config,
             me: "me",

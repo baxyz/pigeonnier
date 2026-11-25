@@ -74,6 +74,32 @@ pub struct Defaults {
     pub direct_reviews_only: bool,
     /// The issues a project lists when it does not choose.
     pub issues: IssueScope,
+    /// The Todoist tasks that are in none of my projects' sections.
+    pub todoist_others: TodoistOthers,
+}
+
+/// Which Todoist tasks outside my projects still come in, under "Autres".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoistOthers {
+    /// Only the tasks of my projects: a whole Todoist account buries what matters.
+    #[default]
+    None,
+    /// Also the tasks of this Todoist project, by name.
+    Project(String),
+    All,
+}
+
+impl TodoistOthers {
+    /// Whether a task of `todoist_project` that is in no project of mine comes in.
+    #[must_use]
+    pub fn keeps(&self, todoist_project: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::Project(name) => name == todoist_project,
+            Self::All => true,
+        }
+    }
 }
 
 impl Default for Defaults {
@@ -86,6 +112,7 @@ impl Default for Defaults {
             include_assigned: false,
             direct_reviews_only: false,
             issues: IssueScope::default(),
+            todoist_others: TodoistOthers::default(),
         }
     }
 }
