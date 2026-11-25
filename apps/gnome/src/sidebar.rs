@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! The sidebar: the home page, then saved filters. A view filters by state or date, a project by
-//! project; choosing one fills the filter bar above the list.
+//! project; choosing one fills the filter bar above the list. The projects scroll on their own,
+//! under the rest that stays in place.
 
 use pigeonnier_core::viewmodel::Entry;
 use relm4::adw::prelude::*;
@@ -11,7 +12,14 @@ use crate::widgets::{all_mark, dot};
 use crate::{App, HOME};
 
 impl App {
-    fn sidebar_row(&self, id: &str, title: &str, mark: &gtk::Widget, count: u32) {
+    fn sidebar_row(
+        &self,
+        list: &gtk::ListBox,
+        id: &str,
+        title: &str,
+        mark: &gtk::Widget,
+        count: u32,
+    ) {
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         line.set_margin_top(6);
         line.set_margin_bottom(6);
@@ -35,9 +43,9 @@ impl App {
         let row = gtk::ListBoxRow::new();
         row.set_child(Some(&line));
         row.set_widget_name(id);
-        self.sidebar.append(&row);
+        list.append(&row);
         if self.entry == id {
-            self.sidebar.select_row(Some(&row));
+            list.select_row(Some(&row));
         }
     }
 
@@ -56,31 +64,41 @@ impl App {
         self.sidebar.append(&row);
     }
 
-    fn sidebar_entry(&self, entry: &Entry) {
+    fn sidebar_entry(&self, list: &gtk::ListBox, entry: &Entry) {
         let mark: gtk::Widget = match (&entry.icon, entry.colors.as_slice()) {
             (Some(icon), _) => gtk::Image::from_icon_name(icon).upcast(),
             (None, [color]) => dot(color).upcast(),
             (None, colors) => all_mark(colors).upcast(),
         };
-        self.sidebar_row(&entry.id, &entry.title, &mark, entry.count);
+        self.sidebar_row(list, &entry.id, &entry.title, &mark, entry.count);
     }
 
     pub(crate) fn draw_sidebar(&self) {
-        while let Some(child) = self.sidebar.first_child() {
-            self.sidebar.remove(&child);
+        for list in [&self.sidebar, &self.sidebar_projects] {
+            while let Some(child) = list.first_child() {
+                list.remove(&child);
+            }
         }
         let Some(snapshot) = &self.snapshot else {
             return;
         };
         let home = gtk::Image::from_icon_name("go-home-symbolic");
-        self.sidebar_row(HOME, "Accueil", home.upcast_ref(), 0);
+        self.sidebar_row(&self.sidebar, HOME, "Accueil", home.upcast_ref(), 0);
         self.sidebar_section("Vues");
         for entry in &snapshot.sidebar.views {
-            self.sidebar_entry(entry);
+            self.sidebar_entry(&self.sidebar, entry);
         }
         self.sidebar_section("Projets");
-        for entry in &snapshot.sidebar.projects {
-            self.sidebar_entry(entry);
+        // "Tous" stays with the views; the projects themselves scroll.
+        let (all, projects) = snapshot
+            .sidebar
+            .projects
+            .split_at(1.min(snapshot.sidebar.projects.len()));
+        for entry in all {
+            self.sidebar_entry(&self.sidebar, entry);
+        }
+        for entry in projects {
+            self.sidebar_entry(&self.sidebar_projects, entry);
         }
     }
 }

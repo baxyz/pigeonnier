@@ -145,6 +145,8 @@ struct App {
     stack: gtk::Stack,
     banner: adw::Banner,
     sidebar: gtk::ListBox,
+    /// The projects, which scroll under the rest of the sidebar.
+    sidebar_projects: gtk::ListBox,
     welcome: gtk::Box,
     home: gtk::Box,
     home_start: gtk::Button,
@@ -644,21 +646,23 @@ impl SimpleComponent for App {
         relm4::set_global_css(include_str!("style.css"));
 
         // The sidebar: the home page, the views and the projects.
+        // Two lists, one selection: the projects scroll on their own under the rest.
         let sidebar = gtk::ListBox::new();
-        sidebar.add_css_class("navigation-sidebar");
-        let select = sender.clone();
-        sidebar.connect_row_activated(move |_, row| {
-            select.input(Msg::SelectEntry(row.widget_name().to_string()));
-        });
+        let sidebar_projects = gtk::ListBox::new();
+        for (list, other) in [(&sidebar, &sidebar_projects), (&sidebar_projects, &sidebar)] {
+            list.add_css_class("navigation-sidebar");
+            let (select, other) = (sender.clone(), other.clone());
+            list.connect_row_activated(move |_, row| {
+                other.unselect_all();
+                select.input(Msg::SelectEntry(row.widget_name().to_string()));
+            });
+        }
+        let sidebar_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        sidebar_box.append(&sidebar);
+        sidebar_box.append(&scrolled(&sidebar_projects));
         let sidebar_header = adw::HeaderBar::new();
         sidebar_header.pack_end(&main_menu(&window, &sender));
-        let sidebar_page = page(
-            "Pigeonnier",
-            &sidebar_header,
-            &[],
-            &scrolled(&sidebar),
-            None,
-        );
+        let sidebar_page = page("Pigeonnier", &sidebar_header, &[], &sidebar_box, None);
 
         // The list, under its filter bar.
         let list_title = adw::WindowTitle::new("Pigeonnier", "");
@@ -844,6 +848,7 @@ impl SimpleComponent for App {
             stack,
             banner,
             sidebar,
+            sidebar_projects,
             welcome,
             home,
             home_start,
