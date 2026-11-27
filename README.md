@@ -4,6 +4,9 @@ A GNOME app that answers one question: **what is waiting for me, project by proj
 pull requests and roadmap items from GitHub and tasks from Todoist, grouped by project rather than by
 service. Local, with no server. See [docs/spec.md](docs/spec.md).
 
+The project is growing into a server on the host and a native app per platform:
+[docs/ecosystem.md](docs/ecosystem.md) describes the plan.
+
 ## Status
 
 | Milestone | State |

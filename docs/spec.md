@@ -4,6 +4,9 @@ Rewritten on November 11, 2026. The first spec described a product for three pla
 daemon, a CLI, a Shell extension and an MCP server; none of it could be tried. This one describes
 an app.
 
+[ecosystem.md](ecosystem.md) describes where the project goes next: a server on the host and a
+native app per platform. Until its steps are built, this spec is what exists.
+
 ## Goal
 
 A GNOME app that answers one question: **what is waiting for me, project by project?**
